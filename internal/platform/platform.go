@@ -4,7 +4,7 @@ package platform
 import (
 	"context"
 
-	"github.com/printcat/printcat/internal/printer"
+	"github.com/timboli111/PrintCat/internal/printer"
 )
 
 // Device is a discovered platform endpoint; capabilities are resolved separately.

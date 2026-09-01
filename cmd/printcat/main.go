@@ -1,6 +1,6 @@
 package main
 
-import "github.com/printcat/printcat/internal/ui/fyneapp"
+import "github.com/timboli111/PrintCat/internal/ui/fyneapp"
 
 func main() {
 	application := fyneapp.New()

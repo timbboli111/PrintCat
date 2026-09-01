@@ -5,8 +5,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/printcat/printcat/internal/document"
-	"github.com/printcat/printcat/internal/render"
+	"github.com/timboli111/PrintCat/internal/document"
+	"github.com/timboli111/PrintCat/internal/render"
 )
 
 type Protocol string

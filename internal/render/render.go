@@ -4,7 +4,7 @@ package render
 import (
 	"context"
 
-	"github.com/printcat/printcat/internal/document"
+	"github.com/timboli111/PrintCat/internal/document"
 )
 
 // Target describes requested output characteristics without selecting a printer protocol.
