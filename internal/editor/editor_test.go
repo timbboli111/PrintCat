@@ -59,3 +59,24 @@ func TestMoveSelected(t *testing.T) {
 		t.Errorf("position after move incorrect")
 	}
 }
+
+func TestSetPaperSizeInvalid(t *testing.T) {
+	doc := document.New("test", "test", document.Size{Width: 80000, Height: 100000})
+	ed := New(&doc)
+	ed.SetPaperSize(0, 50000)
+	if ed.Doc.PageSize.Width != 80000 || ed.Doc.PageSize.Height != 100000 {
+		t.Errorf("paper size changed when invalid width")
+	}
+	ed.SetPaperSize(-1000, 50000)
+	if ed.Doc.PageSize.Width != 80000 {
+		t.Errorf("paper size changed when negative width")
+	}
+	ed.SetPaperSize(60000, 0)
+	if ed.Doc.PageSize.Height != 100000 {
+		t.Errorf("paper size changed when invalid height")
+	}
+	ed.SetPaperSize(60000, 120000)
+	if ed.Doc.PageSize.Width != 60000 || ed.Doc.PageSize.Height != 120000 {
+		t.Errorf("valid paper size not set")
+	}
+}

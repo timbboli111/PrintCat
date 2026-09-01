@@ -52,6 +52,9 @@ func (e *Editor) SetZoom(z float64) {
 }
 
 func (e *Editor) SetPaperSize(w, h document.Unit) {
+	if w <= 0 || h <= 0 {
+		return
+	}
 	e.Doc.PageSize.Width = w
 	e.Doc.PageSize.Height = h
 }

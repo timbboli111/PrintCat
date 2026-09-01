@@ -2,16 +2,18 @@ package fyneapp
 
 import (
 	"fmt"
+	_ "image/jpeg"
+	_ "image/png"
+	"os"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
+
 	"github.com/timboli111/PrintCat/internal/document"
 	"github.com/timboli111/PrintCat/internal/editor"
-	_ "image/jpeg"
-	_ "image/png"
-	"os"
 )
 
 const appID = "com.printcat.app"
@@ -65,10 +67,12 @@ func NewWindow(application fyne.App) fyne.Window {
 	paperHeight.SetText("200")
 	paperApply := widget.NewButton("Set Paper", func() {
 		var w, h float64
-		fmt.Sscanf(paperWidth.Text, "%f", &w)
-		fmt.Sscanf(paperHeight.Text, "%f", &h)
-		ed.SetPaperSize(document.Unit(w*1000), document.Unit(h*1000))
-		canvasWidget.Refresh()
+		n1, _ := fmt.Sscanf(paperWidth.Text, "%f", &w)
+		n2, _ := fmt.Sscanf(paperHeight.Text, "%f", &h)
+		if n1 == 1 && n2 == 1 && w > 0 && h > 0 {
+			ed.SetPaperSize(document.Unit(w*1000), document.Unit(h*1000))
+			canvasWidget.Refresh()
+		}
 	})
 
 	addText := widget.NewButton("Add Text", func() {
@@ -98,6 +102,10 @@ func NewWindow(application fyne.App) fyne.Window {
 		canvasWidget.Refresh()
 	})
 
+	previewButton := widget.NewButton("Preview", func() {
+		ShowPreview(application, ed)
+	})
+
 	topBar := container.NewHBox(
 		widget.NewLabel("PrintCat"),
 		widget.NewLabel("|"),
@@ -110,6 +118,7 @@ func NewWindow(application fyne.App) fyne.Window {
 		addText,
 		addImage,
 		deleteButton,
+		previewButton,
 		widget.NewSeparator(),
 		selectedLabel,
 		widget.NewLabel("(drag to move)"),
