@@ -1,4 +1,3 @@
-// Package printer coordinates independent printer protocol and transport implementations.
 package printer
 
 import (
@@ -38,7 +37,6 @@ const (
 	AndroidPrint     TransportKind = "android-print-framework"
 )
 
-// Connection selects an independently configurable protocol and transport endpoint.
 type Connection struct {
 	Protocol  Protocol
 	Transport TransportKind
@@ -46,27 +44,54 @@ type Connection struct {
 	Options   map[string]string
 }
 
-// Printer is a saved, user-visible printer profile. It does not open a connection.
 type Printer struct {
-	ID         string
-	Name       string
-	Connection Connection
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	Connection Connection     `json:"connection"`
+	Profile    PrinterProfile `json:"profile,omitempty"`
 }
 
-// ProtocolBackend generates bytes for exactly one printer command language.
-// It never discovers devices, pairs Bluetooth, or sends bytes.
+func (p Printer) Validate() error {
+	if err := p.Profile.Validate(); err != nil {
+		return fmt.Errorf("profile validation failed: %w", err)
+	}
+	if len(p.Profile.SupportedProtocols) > 0 {
+		found := false
+		for _, prot := range p.Profile.SupportedProtocols {
+			if prot == p.Connection.Protocol {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("protocol %s not supported by profile (supported: %v)", p.Connection.Protocol, p.Profile.SupportedProtocols)
+		}
+	}
+	if len(p.Profile.SupportedTransports) > 0 {
+		found := false
+		for _, tr := range p.Profile.SupportedTransports {
+			if tr == p.Connection.Transport {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("transport %s not supported by profile (supported: %v)", p.Connection.Transport, p.Profile.SupportedTransports)
+		}
+	}
+	return nil
+}
+
 type ProtocolBackend interface {
 	Protocol() Protocol
-	Encode(ctx context.Context, doc document.Document, renderer render.Renderer, options map[string]string) ([]byte, error)
+	Encode(ctx context.Context, doc document.Document, renderer render.Renderer, profile PrinterProfile, options map[string]string) ([]byte, error)
 }
 
-// Transport sends already-encoded printer bytes. It never formats protocol commands.
 type Transport interface {
 	Kind() TransportKind
 	Send(ctx context.Context, endpoint string, payload []byte, options map[string]string) error
 }
 
-// Service combines registered implementations only at the final send boundary.
 type Service struct {
 	backends   map[Protocol]ProtocolBackend
 	transports map[TransportKind]Transport
@@ -100,8 +125,10 @@ func (s *Service) RegisterTransport(transport Transport) error {
 	return nil
 }
 
-// Print encodes with the selected protocol and sends through the selected transport.
 func (s *Service) Print(ctx context.Context, profile Printer, doc document.Document, renderer render.Renderer) error {
+	if err := profile.Validate(); err != nil {
+		return fmt.Errorf("invalid printer: %w", err)
+	}
 	if err := doc.Validate(); err != nil {
 		return fmt.Errorf("validate document: %w", err)
 	}
@@ -113,7 +140,7 @@ func (s *Service) Print(ctx context.Context, profile Printer, doc document.Docum
 	if !exists {
 		return fmt.Errorf("no transport registered for %q", profile.Connection.Transport)
 	}
-	payload, err := backend.Encode(ctx, doc, renderer, profile.Connection.Options)
+	payload, err := backend.Encode(ctx, doc, renderer, profile.Profile, profile.Connection.Options)
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", backend.Protocol(), err)
 	}
