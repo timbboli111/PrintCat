@@ -7,13 +7,18 @@ import (
 )
 
 type Device struct {
-	ID      string
-	Name    string
-	Kind    printer.TransportKind
-	Profile printer.PrinterProfile
+	ID       string
+	Name     string
+	Kind     printer.TransportKind
+	Endpoint string
+	Profile  printer.PrinterProfile
 }
 
 type Integration interface {
 	Discover(ctx context.Context, kind printer.TransportKind) ([]Device, error)
 	RequestAccess(ctx context.Context, device Device) error
+}
+
+func GetIntegration() Integration {
+	return newDiscovery()
 }
