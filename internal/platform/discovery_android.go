@@ -5,6 +5,7 @@ package platform
 import (
 	"context"
 	"fmt"
+	"time"
 	"unsafe"
 
 	"fyne.io/fyne/v2/driver"
@@ -17,258 +18,158 @@ import (
 #include <string.h>
 
 typedef struct {
-    char* mac;
+    char* address;
     char* name;
 } DeviceInfo;
+
+static DeviceInfo* java_start_discovery(JNIEnv* env, jobject ctx, long timeoutMs, int* count, char** error_msg) {
+    if (error_msg) *error_msg = NULL;
+    *count = 0;
+
+    jclass helperClass = (*env)->FindClass(env, "com/printcat/app/BluetoothDiscoveryHelper");
+    if (helperClass == NULL) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        if (error_msg) *error_msg = strdup("BluetoothDiscoveryHelper class not found");
+        return NULL;
+    }
+
+    jmethodID startDiscovery = (*env)->GetStaticMethodID(env, helperClass, "startDiscovery",
+        "(Landroid/content/Context;J)[Lcom/printcat/app/BluetoothDiscoveryHelper$DeviceInfo;");
+    if (startDiscovery == NULL) {
+        (*env)->DeleteLocalRef(env, helperClass);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        if (error_msg) *error_msg = strdup("startDiscovery method not found");
+        return NULL;
+    }
+
+    jobjectArray resultArray = (*env)->CallStaticObjectMethod(env, helperClass, startDiscovery, ctx, (jlong)timeoutMs);
+    if ((*env)->ExceptionCheck(env)) {
+        jthrowable exc = (*env)->ExceptionOccurred(env);
+        (*env)->ExceptionClear(env);
+        jclass excClass = (*env)->GetObjectClass(env, exc);
+        jmethodID getMessage = (*env)->GetMethodID(env, excClass, "getMessage", "()Ljava/lang/String;");
+        if (getMessage != NULL) {
+            jstring msg = (*env)->CallObjectMethod(env, exc, getMessage);
+            const char* msgStr = (*env)->GetStringUTFChars(env, msg, NULL);
+            if (error_msg) *error_msg = strdup(msgStr);
+            (*env)->ReleaseStringUTFChars(env, msg, msgStr);
+            (*env)->DeleteLocalRef(env, msg);
+        } else {
+            if (error_msg) *error_msg = strdup("Java exception in startDiscovery");
+        }
+        (*env)->DeleteLocalRef(env, excClass);
+        (*env)->DeleteLocalRef(env, exc);
+        (*env)->DeleteLocalRef(env, helperClass);
+        return NULL;
+    }
+
+    if (resultArray == NULL) {
+        (*env)->DeleteLocalRef(env, helperClass);
+        *count = 0;
+        return NULL;
+    }
+
+    jsize len = (*env)->GetArrayLength(env, resultArray);
+    if (len == 0) {
+        (*env)->DeleteLocalRef(env, resultArray);
+        (*env)->DeleteLocalRef(env, helperClass);
+        *count = 0;
+        return NULL;
+    }
+
+    DeviceInfo* infos = (DeviceInfo*)malloc(sizeof(DeviceInfo) * len);
+    if (infos == NULL) {
+        (*env)->DeleteLocalRef(env, resultArray);
+        (*env)->DeleteLocalRef(env, helperClass);
+        if (error_msg) *error_msg = strdup("Failed to allocate memory");
+        return NULL;
+    }
+    memset(infos, 0, sizeof(DeviceInfo) * len);
+
+    jclass deviceInfoClass = (*env)->FindClass(env, "com/printcat/app/BluetoothDiscoveryHelper$DeviceInfo");
+    if (deviceInfoClass == NULL) {
+        free(infos);
+        (*env)->DeleteLocalRef(env, resultArray);
+        (*env)->DeleteLocalRef(env, helperClass);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        if (error_msg) *error_msg = strdup("DeviceInfo class not found");
+        return NULL;
+    }
+
+    jfieldID addressField = (*env)->GetFieldID(env, deviceInfoClass, "address", "Ljava/lang/String;");
+    jfieldID nameField = (*env)->GetFieldID(env, deviceInfoClass, "name", "Ljava/lang/String;");
+    if (addressField == NULL || nameField == NULL) {
+        (*env)->DeleteLocalRef(env, deviceInfoClass);
+        free(infos);
+        (*env)->DeleteLocalRef(env, resultArray);
+        (*env)->DeleteLocalRef(env, helperClass);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        if (error_msg) *error_msg = strdup("DeviceInfo fields not found");
+        return NULL;
+    }
+
+    int idx = 0;
+    for (jsize i = 0; i < len; i++) {
+        jobject deviceInfo = (*env)->GetObjectArrayElement(env, resultArray, i);
+        if (deviceInfo == NULL) continue;
+
+        jstring jAddress = (*env)->GetObjectField(env, deviceInfo, addressField);
+        jstring jName = (*env)->GetObjectField(env, deviceInfo, nameField);
+
+        const char* addrStr = NULL;
+        const char* nameStr = NULL;
+        if (jAddress != NULL) {
+            addrStr = (*env)->GetStringUTFChars(env, jAddress, NULL);
+        }
+        if (jName != NULL) {
+            nameStr = (*env)->GetStringUTFChars(env, jName, NULL);
+        }
+
+        if (addrStr != NULL && strlen(addrStr) > 0) {
+            infos[idx].address = strdup(addrStr);
+            if (nameStr != NULL && strlen(nameStr) > 0) {
+                infos[idx].name = strdup(nameStr);
+            } else {
+                infos[idx].name = strdup("Unknown");
+            }
+            idx++;
+        }
+
+        if (addrStr != NULL) {
+            (*env)->ReleaseStringUTFChars(env, jAddress, addrStr);
+        }
+        if (nameStr != NULL) {
+            (*env)->ReleaseStringUTFChars(env, jName, nameStr);
+        }
+        if (jAddress != NULL) {
+            (*env)->DeleteLocalRef(env, jAddress);
+        }
+        if (jName != NULL) {
+            (*env)->DeleteLocalRef(env, jName);
+        }
+        (*env)->DeleteLocalRef(env, deviceInfo);
+    }
+
+    *count = idx;
+    (*env)->DeleteLocalRef(env, deviceInfoClass);
+    (*env)->DeleteLocalRef(env, resultArray);
+    (*env)->DeleteLocalRef(env, helperClass);
+
+    return infos;
+}
 
 static void free_device_infos(DeviceInfo* infos, int count) {
     if (infos == NULL) return;
     for (int i = 0; i < count; i++) {
-        if (infos[i].mac) free(infos[i].mac);
+        if (infos[i].address) free(infos[i].address);
         if (infos[i].name) free(infos[i].name);
     }
     free(infos);
 }
-
-static DeviceInfo* bluetooth_get_bonded_devices(JNIEnv* env, jobject ctx, int* count, char** error_msg) {
-    if (error_msg) *error_msg = NULL;
-    *count = 0;
-
-    jclass bluetoothManagerClass = (*env)->FindClass(env, "android/bluetooth/BluetoothManager");
-    if (bluetoothManagerClass == NULL) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("BluetoothManager class not found");
-        return NULL;
-    }
-
-    jclass contextClass = (*env)->FindClass(env, "android/content/Context");
-    if (contextClass == NULL) {
-        (*env)->DeleteLocalRef(env, bluetoothManagerClass);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("Context class not found");
-        return NULL;
-    }
-
-    jmethodID getSystemService = (*env)->GetMethodID(env, contextClass, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
-    if (getSystemService == NULL) {
-        (*env)->DeleteLocalRef(env, contextClass);
-        (*env)->DeleteLocalRef(env, bluetoothManagerClass);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("getSystemService method not found");
-        return NULL;
-    }
-
-    jstring serviceName = (*env)->NewStringUTF(env, "bluetooth");
-    if (serviceName == NULL) {
-        (*env)->DeleteLocalRef(env, contextClass);
-        (*env)->DeleteLocalRef(env, bluetoothManagerClass);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("failed to create service name string");
-        return NULL;
-    }
-
-    jobject manager = (*env)->CallObjectMethod(env, ctx, getSystemService, serviceName);
-    (*env)->DeleteLocalRef(env, serviceName);
-    (*env)->DeleteLocalRef(env, contextClass);
-    if (manager == NULL) {
-        (*env)->DeleteLocalRef(env, bluetoothManagerClass);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("failed to get BluetoothManager");
-        return NULL;
-    }
-
-    jmethodID getAdapter = (*env)->GetMethodID(env, bluetoothManagerClass, "getAdapter", "()Landroid/bluetooth/BluetoothAdapter;");
-    if (getAdapter == NULL) {
-        (*env)->DeleteLocalRef(env, manager);
-        (*env)->DeleteLocalRef(env, bluetoothManagerClass);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("getAdapter method not found");
-        return NULL;
-    }
-
-    jobject adapter = (*env)->CallObjectMethod(env, manager, getAdapter);
-    (*env)->DeleteLocalRef(env, manager);
-    (*env)->DeleteLocalRef(env, bluetoothManagerClass);
-    if (adapter == NULL) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        *count = 0;
-        return NULL;
-    }
-
-    jclass adapterClass = (*env)->GetObjectClass(env, adapter);
-    if (adapterClass == NULL) {
-        (*env)->DeleteLocalRef(env, adapter);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("BluetoothAdapter class not found");
-        return NULL;
-    }
-
-    jmethodID getBondedDevices = (*env)->GetMethodID(env, adapterClass, "getBondedDevices", "()Ljava/util/Set;");
-    if (getBondedDevices == NULL) {
-        (*env)->DeleteLocalRef(env, adapterClass);
-        (*env)->DeleteLocalRef(env, adapter);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("getBondedDevices method not found");
-        return NULL;
-    }
-
-    jobject bondedSet = (*env)->CallObjectMethod(env, adapter, getBondedDevices);
-    (*env)->DeleteLocalRef(env, adapterClass);
-    (*env)->DeleteLocalRef(env, adapter);
-    if (bondedSet == NULL) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        *count = 0;
-        return NULL;
-    }
-
-    jclass setClass = (*env)->GetObjectClass(env, bondedSet);
-    if (setClass == NULL) {
-        (*env)->DeleteLocalRef(env, bondedSet);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("Set class not found");
-        return NULL;
-    }
-
-    jmethodID iterator = (*env)->GetMethodID(env, setClass, "iterator", "()Ljava/util/Iterator;");
-    if (iterator == NULL) {
-        (*env)->DeleteLocalRef(env, setClass);
-        (*env)->DeleteLocalRef(env, bondedSet);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("iterator method not found");
-        return NULL;
-    }
-
-    jobject iter = (*env)->CallObjectMethod(env, bondedSet, iterator);
-    (*env)->DeleteLocalRef(env, setClass);
-    if (iter == NULL) {
-        (*env)->DeleteLocalRef(env, bondedSet);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        *count = 0;
-        return NULL;
-    }
-
-    jclass iterClass = (*env)->GetObjectClass(env, iter);
-    if (iterClass == NULL) {
-        (*env)->DeleteLocalRef(env, iter);
-        (*env)->DeleteLocalRef(env, bondedSet);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("Iterator class not found");
-        return NULL;
-    }
-
-    jmethodID hasNext = (*env)->GetMethodID(env, iterClass, "hasNext", "()Z");
-    jmethodID next = (*env)->GetMethodID(env, iterClass, "next", "()Ljava/lang/Object;");
-    if (hasNext == NULL || next == NULL) {
-        (*env)->DeleteLocalRef(env, iterClass);
-        (*env)->DeleteLocalRef(env, iter);
-        (*env)->DeleteLocalRef(env, bondedSet);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("Iterator methods not found");
-        return NULL;
-    }
-
-    int deviceCount = 0;
-    jboolean hasMore = (*env)->CallBooleanMethod(env, iter, hasNext);
-    while (hasMore == JNI_TRUE) {
-        jobject device = (*env)->CallObjectMethod(env, iter, next);
-        if (device != NULL) {
-            deviceCount++;
-            (*env)->DeleteLocalRef(env, device);
-        }
-        hasMore = (*env)->CallBooleanMethod(env, iter, hasNext);
-    }
-
-    (*env)->DeleteLocalRef(env, iter);
-    iter = (*env)->CallObjectMethod(env, bondedSet, iterator);
-    if (iter == NULL) {
-        (*env)->DeleteLocalRef(env, bondedSet);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        *count = 0;
-        return NULL;
-    }
-
-    DeviceInfo* infos = (DeviceInfo*)malloc(sizeof(DeviceInfo) * deviceCount);
-    if (infos == NULL) {
-        (*env)->DeleteLocalRef(env, iter);
-        (*env)->DeleteLocalRef(env, bondedSet);
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        if (error_msg) *error_msg = strdup("failed to allocate memory");
-        return NULL;
-    }
-    memset(infos, 0, sizeof(DeviceInfo) * deviceCount);
-
-    int idx = 0;
-    hasMore = (*env)->CallBooleanMethod(env, iter, hasNext);
-    while (hasMore == JNI_TRUE && idx < deviceCount) {
-        jobject device = (*env)->CallObjectMethod(env, iter, next);
-        if (device == NULL) {
-            hasMore = (*env)->CallBooleanMethod(env, iter, hasNext);
-            continue;
-        }
-
-        jclass deviceClass = (*env)->GetObjectClass(env, device);
-        if (deviceClass != NULL) {
-            jmethodID getName = (*env)->GetMethodID(env, deviceClass, "getName", "()Ljava/lang/String;");
-            jmethodID getAddress = (*env)->GetMethodID(env, deviceClass, "getAddress", "()Ljava/lang/String;");
-
-            if (getName != NULL && getAddress != NULL) {
-                jstring jName = (*env)->CallObjectMethod(env, device, getName);
-                jstring jAddress = (*env)->CallObjectMethod(env, device, getAddress);
-
-                const char* nameStr = NULL;
-                const char* addrStr = NULL;
-                if (jName != NULL) {
-                    nameStr = (*env)->GetStringUTFChars(env, jName, NULL);
-                }
-                if (jAddress != NULL) {
-                    addrStr = (*env)->GetStringUTFChars(env, jAddress, NULL);
-                }
-
-                if (addrStr != NULL && strlen(addrStr) > 0) {
-                    infos[idx].mac = strdup(addrStr);
-                    if (nameStr != NULL && strlen(nameStr) > 0) {
-                        infos[idx].name = strdup(nameStr);
-                    } else {
-                        infos[idx].name = strdup("Unknown");
-                    }
-                    idx++;
-                }
-
-                if (nameStr != NULL) {
-                    (*env)->ReleaseStringUTFChars(env, jName, nameStr);
-                }
-                if (addrStr != NULL) {
-                    (*env)->ReleaseStringUTFChars(env, jAddress, addrStr);
-                }
-                if (jName != NULL) {
-                    (*env)->DeleteLocalRef(env, jName);
-                }
-                if (jAddress != NULL) {
-                    (*env)->DeleteLocalRef(env, jAddress);
-                }
-            }
-            (*env)->DeleteLocalRef(env, deviceClass);
-        }
-        (*env)->DeleteLocalRef(env, device);
-        hasMore = (*env)->CallBooleanMethod(env, iter, hasNext);
-    }
-
-    *count = idx;
-    (*env)->DeleteLocalRef(env, iter);
-    (*env)->DeleteLocalRef(env, bondedSet);
-
-    if ((*env)->ExceptionCheck(env)) {
-        (*env)->ExceptionClear(env);
-        free_device_infos(infos, idx);
-        if (error_msg) *error_msg = strdup("exception during bonded devices iteration");
-        *count = 0;
-        return NULL;
-    }
-
-    return infos;
-}
 */
 import "C"
+
+const discoveryTimeout = 15 * time.Second
 
 type discoveryAndroid struct{}
 
@@ -279,60 +180,59 @@ func (d *discoveryAndroid) Discover(ctx context.Context, kind printer.TransportK
 
 	var devices []Device
 	var err error
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		err = driver.RunNative(func(raw interface{}) error {
-			ac, ok := raw.(*driver.AndroidContext)
-			if !ok {
-				return fmt.Errorf("failed to get Android context")
-			}
-			env := (*C.JNIEnv)(unsafe.Pointer(ac.Env))
-			ctxObj := (C.jobject)(unsafe.Pointer(ac.Ctx))
 
-			var count C.int
-			var errMsg *C.char
-			infos := C.bluetooth_get_bonded_devices(env, ctxObj, &count, &errMsg)
-			if errMsg != nil {
-				defer C.free(unsafe.Pointer(errMsg))
-				return fmt.Errorf("JNI error: %s", C.GoString(errMsg))
-			}
-			if infos == nil || count == 0 {
-				return nil
-			}
-			defer C.free_device_infos(infos, count)
+	// RunNative is blocking; it will not return until Java discovery finishes or times out.
+	// Since Discover is called from a goroutine in UI, this is safe.
+	err = driver.RunNative(func(raw interface{}) error {
+		ac, ok := raw.(*driver.AndroidContext)
+		if !ok {
+			return fmt.Errorf("failed to get Android context")
+		}
+		env := (*C.JNIEnv)(unsafe.Pointer(ac.Env))
+		ctxObj := (C.jobject)(unsafe.Pointer(ac.Ctx))
 
-			// Convert C array to Go slice without giant array literal
-			cInfos := unsafe.Slice(infos, count)
-			for _, info := range cInfos {
-				if info.mac == nil || C.strlen(info.mac) == 0 {
-					continue
-				}
-				mac := C.GoString(info.mac)
-				name := C.GoString(info.name)
-				if name == "" {
-					name = "Unknown"
-				}
-				devices = append(devices, Device{
-					ID:       mac,
-					Name:     name,
-					Kind:     printer.BluetoothClassic,
-					Endpoint: mac,
-					Profile: printer.PrinterProfile{
-						SupportedProtocols:  []printer.Protocol{},
-						SupportedTransports: []printer.TransportKind{printer.BluetoothClassic},
-					},
-				})
-			}
+		timeoutMs := C.long(discoveryTimeout.Milliseconds())
+
+		var count C.int
+		var errMsg *C.char
+		infos := C.java_start_discovery(env, ctxObj, timeoutMs, &count, &errMsg)
+		if errMsg != nil {
+			defer C.free(unsafe.Pointer(errMsg))
+			return fmt.Errorf("JNI error: %s", C.GoString(errMsg))
+		}
+		if infos == nil || count == 0 {
 			return nil
-		})
-	}()
-	select {
-	case <-done:
-		return devices, err
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		}
+		defer C.free_device_infos(infos, count)
+
+		cInfos := unsafe.Slice(infos, count)
+		for _, info := range cInfos {
+			if info.address == nil || C.strlen(info.address) == 0 {
+				continue
+			}
+			address := C.GoString(info.address)
+			name := C.GoString(info.name)
+			if name == "" {
+				name = "Unknown"
+			}
+			devices = append(devices, Device{
+				ID:       address,
+				Name:     name,
+				Kind:     printer.BluetoothClassic,
+				Endpoint: address,
+				Profile: printer.PrinterProfile{
+					SupportedProtocols:  []printer.Protocol{},
+					SupportedTransports: []printer.TransportKind{printer.BluetoothClassic},
+				},
+			})
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
 	}
+	return devices, nil
 }
 
 func (d *discoveryAndroid) RequestAccess(ctx context.Context, device Device) error {
