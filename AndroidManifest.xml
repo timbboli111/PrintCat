@@ -2,36 +2,31 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.printcat.app">
 
-    <!-- Permission dasar Fyne -->
+    <!-- Permission dasar yang dibutuhkan Fyne dan PrintCat -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Bluetooth Classic (Android <= 11) -->
+    <!-- Bluetooth permissions untuk Android <= 11 -->
     <uses-permission android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
 
-    <!-- Bluetooth Classic (Android 12+) -->
+    <!-- Bluetooth Scan untuk Android 12+ (active discovery) -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+
+    <!-- Bluetooth Connect untuk Android 12+ (interaksi/koneksi) -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- Fitur Bluetooth tidak wajib -->
+    <!-- Location permission untuk Android 10-11 (diperlukan untuk scan) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+
+    <!-- Fitur Bluetooth (tidak wajib) -->
     <uses-feature android:name="android.hardware.bluetooth"
         android:required="false" />
-
-    <application
-        android:label="PrintCat"
-        android:debuggable="false">
-        <activity
-            android:name="org.golang.app.GoNativeActivity"
-            android:label="PrintCat"
-            android:configChanges="0xa0">
-            <meta-data
-                android:name="android.app.lib_name"
-                android:value="printcat" />
-        </activity>
-    </application>
 
 </manifest>

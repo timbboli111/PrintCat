@@ -3,6 +3,7 @@ package fyneapp
 import (
 	"context"
 	"fmt"
+	"image/color"
 	_ "image/jpeg"
 	_ "image/png"
 	"os"
@@ -12,8 +13,10 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/timboli111/PrintCat/internal/document"
@@ -152,6 +155,7 @@ func NewWindow(application fyne.App) fyne.Window {
 	var selectedDevice *platform.Device
 	var configuredPrinter *printer.Printer
 	var isPrinting bool
+	var isRefreshing bool
 	var printButton *widget.Button
 
 	printerStatus := widget.NewLabel("")
@@ -184,65 +188,116 @@ func NewWindow(application fyne.App) fyne.Window {
 	}
 
 	refreshDevices := func() {
-		printerStatus.SetText("Scanning...")
-		printerSelect.Disable()
-		printerSelect.Refresh()
-
-		ctx := context.Background()
-		integration := platform.GetIntegration()
-
-		var targetKind printer.TransportKind
-		if runtime.GOOS == "windows" {
-			targetKind = printer.Serial
-		} else if runtime.GOOS == "android" {
-			targetKind = printer.BluetoothClassic
-		} else {
-			targetKind = ""
-		}
-
-		discovered, err := integration.Discover(ctx, targetKind)
-		if err != nil {
-			printerStatus.SetText(fmt.Sprintf("Error: %v", err))
-			printerSelect.Enable()
+		if isRefreshing {
 			return
 		}
+		isRefreshing = true
+		printerSelect.Disable()
+		printerSelect.Refresh()
+		printerStatus.SetText("Scanning...")
 
 		var prevID string
 		if selectedDevice != nil {
 			prevID = selectedDevice.ID
 		}
 
-		devices = discovered
-		if len(devices) == 0 {
-			printerSelect.Options = []string{}
-			printerSelect.PlaceHolder = "No printer found"
-			printerStatus.SetText("No printers found")
-			selectedDevice = nil
-			configuredPrinter = nil
-			updateConfiguredStatus()
-		} else {
-			options := make([]string, len(devices))
-			for i, dev := range devices {
-				options[i] = formatDeviceDisplay(dev)
-			}
-			printerSelect.Options = options
-			printerSelect.PlaceHolder = "Select a printer"
+		go func() {
+			defer fyne.Do(func() {
+				isRefreshing = false
+				printerSelect.Enable()
+				printerSelect.Refresh()
+			})
 
-			selectedIdx := 0
-			if prevID != "" {
-				for i, dev := range devices {
-					if dev.ID == prevID {
-						selectedIdx = i
-						break
+			ctx := context.Background()
+
+			if runtime.GOOS == "android" {
+				if platform.GetAndroidAPIVersion() >= 31 {
+					connectGranted, err := platform.EnsureBluetoothConnectPermission(ctx)
+					if err != nil {
+						fyne.Do(func() {
+							printerStatus.SetText(fmt.Sprintf("Permission error: %v", err))
+							dialog.ShowError(fmt.Errorf("bluetooth connect permission error: %w", err), window)
+						})
+						return
+					}
+					if !connectGranted {
+						fyne.Do(func() {
+							printerStatus.SetText("Bluetooth connect permission denied")
+							dialog.ShowInformation("Permission Denied", "Bluetooth connect permission is required to discover printers.", window)
+						})
+						return
 					}
 				}
+
+				scanGranted, err := platform.EnsureBluetoothScanPermission(ctx)
+				if err != nil {
+					fyne.Do(func() {
+						printerStatus.SetText(fmt.Sprintf("Permission error: %v", err))
+						dialog.ShowError(fmt.Errorf("bluetooth scan permission error: %w", err), window)
+					})
+					return
+				}
+				if !scanGranted {
+					fyne.Do(func() {
+						printerStatus.SetText("Bluetooth scan permission denied")
+						dialog.ShowInformation("Permission Denied", "Bluetooth scan permission is required to discover printers.", window)
+					})
+					return
+				}
 			}
-			printerSelect.SetSelected(options[selectedIdx])
-			selectedDevice = &devices[selectedIdx]
-			printerStatus.SetText(fmt.Sprintf("Selected: %s", options[selectedIdx]))
-		}
-		printerSelect.Enable()
-		printerSelect.Refresh()
+
+			integration := platform.GetIntegration()
+
+			var targetKind printer.TransportKind
+			if runtime.GOOS == "windows" {
+				targetKind = printer.Serial
+			} else if runtime.GOOS == "android" {
+				targetKind = printer.BluetoothClassic
+			} else {
+				targetKind = ""
+			}
+
+			discovered, err := integration.Discover(ctx, targetKind)
+			if err != nil {
+				fyne.Do(func() {
+					printerStatus.SetText(fmt.Sprintf("Error: %v", err))
+				})
+				return
+			}
+
+			fyne.Do(func() {
+				devices = discovered
+				if len(devices) == 0 {
+					printerSelect.Options = []string{}
+					printerSelect.PlaceHolder = "No printer found"
+					printerStatus.SetText("No printers found")
+					selectedDevice = nil
+					configuredPrinter = nil
+					updateConfiguredStatus()
+				} else {
+					options := make([]string, len(devices))
+					for i, dev := range devices {
+						options[i] = formatDeviceDisplay(dev)
+					}
+					printerSelect.Options = options
+					printerSelect.PlaceHolder = "Select a printer"
+
+					selectedIdx := 0
+					if prevID != "" {
+						for i, dev := range devices {
+							if dev.ID == prevID {
+								selectedIdx = i
+								break
+							}
+						}
+					}
+					printerSelect.SetSelected(options[selectedIdx])
+					selectedDevice = &devices[selectedIdx]
+					printerStatus.SetText(fmt.Sprintf("Selected: %s", options[selectedIdx]))
+				}
+				printerSelect.Refresh()
+			})
+		}()
 	}
 
 	showConfigDialog := func() {
@@ -373,10 +428,7 @@ func NewWindow(application fyne.App) fyne.Window {
 		configWindow.Show()
 	}
 
-	// Declaration of printButton before use.
-	// The actual button is created below.
 	_ = printButton
-
 	printButton = widget.NewButton("Print", func() {
 		if isPrinting {
 			return
@@ -408,26 +460,34 @@ func NewWindow(application fyne.App) fyne.Window {
 			if configuredPrinter.Connection.Transport == printer.BluetoothClassic {
 				granted, err := platform.EnsureBluetoothConnectPermission(ctx)
 				if err != nil {
-					printerStatus.SetText(fmt.Sprintf("Permission error: %v", err))
-					dialog.ShowError(fmt.Errorf("bluetooth permission error: %w", err), window)
+					fyne.Do(func() {
+						printerStatus.SetText(fmt.Sprintf("Permission error: %v", err))
+						dialog.ShowError(fmt.Errorf("bluetooth permission error: %w", err), window)
+					})
 					return
 				}
 				if !granted {
-					printerStatus.SetText("Bluetooth permission denied")
-					dialog.ShowInformation("Permission Denied", "Bluetooth permission is required to print.", window)
+					fyne.Do(func() {
+						printerStatus.SetText("Bluetooth permission denied")
+						dialog.ShowInformation("Permission Denied", "Bluetooth permission is required to print.", window)
+					})
 					return
 				}
 			}
 
 			err := service.Print(ctx, *configuredPrinter, doc, renderer)
 			if err != nil {
-				printerStatus.SetText(fmt.Sprintf("Print failed: %v", err))
-				dialog.ShowError(fmt.Errorf("print failed: %w", err), window)
+				fyne.Do(func() {
+					printerStatus.SetText(fmt.Sprintf("Print failed: %v", err))
+					dialog.ShowError(fmt.Errorf("print failed: %w", err), window)
+				})
 				return
 			}
 
-			printerStatus.SetText("Print successful")
-			dialog.ShowInformation("Success", "Print job completed successfully.", window)
+			fyne.Do(func() {
+				printerStatus.SetText("Print successful")
+				dialog.ShowInformation("Success", "Print job completed successfully.", window)
+			})
 		}()
 	})
 
@@ -467,7 +527,24 @@ func NewWindow(application fyne.App) fyne.Window {
 
 	content := container.NewBorder(topBar, nil, leftPanel, nil, scroll)
 
-	window.SetContent(content)
+	footerText1 := canvas.NewText("© 2026 PrintCat — Printing Tool by Pram", theme.ForegroundColor())
+	footerText1.Alignment = fyne.TextAlignCenter
+	footerText1.TextSize = 14
+
+	footerText2 := canvas.NewText("Dedicated to my beloved wife, Apdini Nurrayani", color.Gray{Y: 170})
+	footerText2.Alignment = fyne.TextAlignCenter
+	footerText2.TextSize = 11
+
+	footer := container.NewCenter(
+		container.NewVBox(
+			footerText1,
+			footerText2,
+		),
+	)
+
+	fullLayout := container.NewBorder(nil, footer, nil, nil, content)
+
+	window.SetContent(fullLayout)
 	return window
 }
 

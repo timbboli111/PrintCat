@@ -1,14 +1,10 @@
-//go:build windows
-
 package platform
 
 import (
 	"context"
 	"fmt"
-	"unsafe"
 
 	"github.com/timboli111/PrintCat/internal/printer"
-	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -41,11 +37,9 @@ func (d *discoveryWindows) Discover(ctx context.Context, kind printer.TransportK
 			continue
 		}
 		// Windows COM port naming: COMx (case insensitive)
-		// Filter value to only COM ports
 		if len(value) < 4 || value[:3] != "COM" {
 			continue
 		}
-		// Skip duplicate endpoints
 		if _, exists := deviceMap[value]; exists {
 			continue
 		}
@@ -63,13 +57,10 @@ func (d *discoveryWindows) Discover(ctx context.Context, kind printer.TransportK
 		})
 	}
 
-	// If no COM ports found, return empty slice (not error)
 	return devices, nil
 }
 
 func (d *discoveryWindows) RequestAccess(ctx context.Context, device Device) error {
-	// For Windows MVP, no special access request is needed.
-	// The COM port will be opened by the transport when printing.
 	return nil
 }
 
