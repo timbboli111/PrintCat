@@ -16,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -37,7 +38,42 @@ import (
 const appID = "com.printcat.app"
 
 func New() fyne.App {
-	return app.NewWithID(appID)
+	application := app.NewWithID(appID)
+	if runtime.GOOS == "android" {
+		application.Settings().SetTheme(&androidTheme{})
+	}
+	return application
+}
+
+func discoverBluetoothPrinters(ctx context.Context, window fyne.Window) ([]platform.Device, error) {
+	if runtime.GOOS != "android" {
+		return nil, nil
+	}
+
+	if platform.GetAndroidAPIVersion() >= 31 {
+		connectGranted, err := platform.EnsureBluetoothConnectPermission(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("bluetooth connect permission error: %w", err)
+		}
+		if !connectGranted {
+			return nil, fmt.Errorf("bluetooth connect permission denied")
+		}
+	}
+
+	scanGranted, err := platform.EnsureBluetoothScanPermission(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("bluetooth scan permission error: %w", err)
+	}
+	if !scanGranted {
+		return nil, fmt.Errorf("bluetooth scan permission denied")
+	}
+
+	integration := platform.GetIntegration()
+	discovered, err := integration.Discover(ctx, printer.BluetoothClassic)
+	if err != nil {
+		return nil, fmt.Errorf("discovery failed: %w", err)
+	}
+	return discovered, nil
 }
 
 func NewWindow(application fyne.App) fyne.Window {
@@ -74,12 +110,18 @@ func NewWindow(application fyne.App) fyne.Window {
 	doc := document.New("doc1", "My Document", document.Size{Width: 80_000, Height: 200_000})
 	ed := editor.New(&doc)
 
+	var androidCombinedStatus *widget.Label
+	var updateCombinedStatusDisplay func()
+
 	selectedLabel := widget.NewLabel("Selected: none")
 	canvasWidget := NewCanvas(ed, func(id string) {
 		if id == "" {
 			selectedLabel.SetText("Selected: none")
 		} else {
 			selectedLabel.SetText(fmt.Sprintf("Selected: %s", id))
+		}
+		if runtime.GOOS == "android" && updateCombinedStatusDisplay != nil {
+			updateCombinedStatusDisplay()
 		}
 	})
 
@@ -168,6 +210,9 @@ func NewWindow(application fyne.App) fyne.Window {
 				printerStatus.SetText(fmt.Sprintf("Selected: %s", display))
 				configuredStatus.SetText("Not configured")
 				configuredPrinter = nil
+				if updateCombinedStatusDisplay != nil {
+					updateCombinedStatusDisplay()
+				}
 				return
 			}
 		}
@@ -177,14 +222,45 @@ func NewWindow(application fyne.App) fyne.Window {
 	updateConfiguredStatus := func() {
 		if configuredPrinter == nil {
 			configuredStatus.SetText("Not configured")
-			return
+		} else {
+			configuredStatus.SetText(fmt.Sprintf(
+				"Configured: %s / %s (DPI: %d)",
+				configuredPrinter.Connection.Protocol,
+				configuredPrinter.Connection.Transport,
+				configuredPrinter.Profile.DPI,
+			))
 		}
-		configuredStatus.SetText(fmt.Sprintf(
-			"Configured: %s / %s (DPI: %d)",
-			configuredPrinter.Connection.Protocol,
-			configuredPrinter.Connection.Transport,
-			configuredPrinter.Profile.DPI,
-		))
+		if updateCombinedStatusDisplay != nil {
+			updateCombinedStatusDisplay()
+		}
+	}
+
+	updateCombinedStatusDisplay = func() {
+		if androidCombinedStatus != nil {
+			statusParts := []string{}
+			if printerStatus.Text != "" {
+				statusParts = append(statusParts, printerStatus.Text)
+			}
+			if configuredStatus.Text != "" && configuredStatus.Text != "Not configured" {
+				statusParts = append(statusParts, configuredStatus.Text)
+			}
+			statusStr := ""
+			if len(statusParts) > 0 {
+				statusStr = " | " + statusParts[0]
+				for i := 1; i < len(statusParts); i++ {
+					statusStr += " | " + statusParts[i]
+				}
+			}
+			selText := selectedLabel.Text
+			if selText == "" || selText == "Selected: none" {
+				selText = "No selection"
+			}
+			if statusStr != "" {
+				androidCombinedStatus.SetText("Status:" + statusStr + " | " + selText + " (drag to move)")
+			} else {
+				androidCombinedStatus.SetText(selText + " (drag to move)")
+			}
+		}
 	}
 
 	refreshDevices := func() {
@@ -195,6 +271,9 @@ func NewWindow(application fyne.App) fyne.Window {
 		printerSelect.Disable()
 		printerSelect.Refresh()
 		printerStatus.SetText("Scanning...")
+		if updateCombinedStatusDisplay != nil {
+			updateCombinedStatusDisplay()
+		}
 
 		var prevID string
 		if selectedDevice != nil {
@@ -210,57 +289,25 @@ func NewWindow(application fyne.App) fyne.Window {
 
 			ctx := context.Background()
 
+			var discovered []platform.Device
+			var err error
+
 			if runtime.GOOS == "android" {
-				if platform.GetAndroidAPIVersion() >= 31 {
-					connectGranted, err := platform.EnsureBluetoothConnectPermission(ctx)
-					if err != nil {
-						fyne.Do(func() {
-							printerStatus.SetText(fmt.Sprintf("Permission error: %v", err))
-							dialog.ShowError(fmt.Errorf("bluetooth connect permission error: %w", err), window)
-						})
-						return
-					}
-					if !connectGranted {
-						fyne.Do(func() {
-							printerStatus.SetText("Bluetooth connect permission denied")
-							dialog.ShowInformation("Permission Denied", "Bluetooth connect permission is required to discover printers.", window)
-						})
-						return
-					}
-				}
-
-				scanGranted, err := platform.EnsureBluetoothScanPermission(ctx)
-				if err != nil {
-					fyne.Do(func() {
-						printerStatus.SetText(fmt.Sprintf("Permission error: %v", err))
-						dialog.ShowError(fmt.Errorf("bluetooth scan permission error: %w", err), window)
-					})
-					return
-				}
-				if !scanGranted {
-					fyne.Do(func() {
-						printerStatus.SetText("Bluetooth scan permission denied")
-						dialog.ShowInformation("Permission Denied", "Bluetooth scan permission is required to discover printers.", window)
-					})
-					return
-				}
-			}
-
-			integration := platform.GetIntegration()
-
-			var targetKind printer.TransportKind
-			if runtime.GOOS == "windows" {
-				targetKind = printer.Serial
-			} else if runtime.GOOS == "android" {
-				targetKind = printer.BluetoothClassic
+				discovered, err = discoverBluetoothPrinters(ctx, window)
+			} else if runtime.GOOS == "windows" {
+				integration := platform.GetIntegration()
+				discovered, err = integration.Discover(ctx, printer.Serial)
 			} else {
-				targetKind = ""
+				discovered, err = nil, nil
 			}
 
-			discovered, err := integration.Discover(ctx, targetKind)
 			if err != nil {
 				fyne.Do(func() {
 					printerStatus.SetText(fmt.Sprintf("Error: %v", err))
+					if updateCombinedStatusDisplay != nil {
+						updateCombinedStatusDisplay()
+					}
+					dialog.ShowError(fmt.Errorf("discovery error: %w", err), window)
 				})
 				return
 			}
@@ -294,6 +341,9 @@ func NewWindow(application fyne.App) fyne.Window {
 					printerSelect.SetSelected(options[selectedIdx])
 					selectedDevice = &devices[selectedIdx]
 					printerStatus.SetText(fmt.Sprintf("Selected: %s", options[selectedIdx]))
+					if updateCombinedStatusDisplay != nil {
+						updateCombinedStatusDisplay()
+					}
 				}
 				printerSelect.Refresh()
 			})
@@ -445,6 +495,9 @@ func NewWindow(application fyne.App) fyne.Window {
 		}
 
 		printerStatus.SetText("Printing...")
+		if updateCombinedStatusDisplay != nil {
+			updateCombinedStatusDisplay()
+		}
 		isPrinting = true
 		printButton.Disable()
 
@@ -462,6 +515,9 @@ func NewWindow(application fyne.App) fyne.Window {
 				if err != nil {
 					fyne.Do(func() {
 						printerStatus.SetText(fmt.Sprintf("Permission error: %v", err))
+						if updateCombinedStatusDisplay != nil {
+							updateCombinedStatusDisplay()
+						}
 						dialog.ShowError(fmt.Errorf("bluetooth permission error: %w", err), window)
 					})
 					return
@@ -469,6 +525,9 @@ func NewWindow(application fyne.App) fyne.Window {
 				if !granted {
 					fyne.Do(func() {
 						printerStatus.SetText("Bluetooth permission denied")
+						if updateCombinedStatusDisplay != nil {
+							updateCombinedStatusDisplay()
+						}
 						dialog.ShowInformation("Permission Denied", "Bluetooth permission is required to print.", window)
 					})
 					return
@@ -479,6 +538,9 @@ func NewWindow(application fyne.App) fyne.Window {
 			if err != nil {
 				fyne.Do(func() {
 					printerStatus.SetText(fmt.Sprintf("Print failed: %v", err))
+					if updateCombinedStatusDisplay != nil {
+						updateCombinedStatusDisplay()
+					}
 					dialog.ShowError(fmt.Errorf("print failed: %w", err), window)
 				})
 				return
@@ -486,6 +548,9 @@ func NewWindow(application fyne.App) fyne.Window {
 
 			fyne.Do(func() {
 				printerStatus.SetText("Print successful")
+				if updateCombinedStatusDisplay != nil {
+					updateCombinedStatusDisplay()
+				}
 				dialog.ShowInformation("Success", "Print job completed successfully.", window)
 			})
 		}()
@@ -495,56 +560,386 @@ func NewWindow(application fyne.App) fyne.Window {
 	configureButton := widget.NewButton("Configure", showConfigDialog)
 
 	printerLabel := widget.NewLabelWithStyle("Printer:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	printerBox := container.NewVBox(
-		printerLabel,
-		container.NewHBox(printerSelect, refreshButton),
-		container.NewHBox(configureButton, printButton),
-		printerStatus,
-		configuredStatus,
-	)
 
 	refreshDevices()
 
-	topBar := container.NewHBox(
-		widget.NewLabel("PrintCat"),
-		widget.NewLabel("|"),
-		widget.NewLabel("Paper:"), paperWidth, widget.NewLabel("mm x"), paperHeight, widget.NewLabel("mm"), paperApply,
-		widget.NewLabel("| Zoom:"), zoomOut, zoomIn, fitButton, zoomLabel,
-	)
+	var editorContent *fyne.Container
 
-	leftPanel := container.NewVBox(
-		widget.NewLabel("Tools"),
-		addText,
-		addImage,
-		deleteButton,
-		previewButton,
-		widget.NewSeparator(),
-		printerBox,
-		widget.NewSeparator(),
-		selectedLabel,
-		widget.NewLabel("(drag to move)"),
-	)
+	if runtime.GOOS == "android" {
+		topBar := container.NewHBox(
+			widget.NewLabel("PrintCat"),
+			layout.NewSpacer(),
+			zoomOut, zoomIn, fitButton, zoomLabel,
+		)
 
-	content := container.NewBorder(topBar, nil, leftPanel, nil, scroll)
+		toolsToolbar := container.NewHBox(addText, addImage, deleteButton, previewButton)
 
-	footerText1 := canvas.NewText("© 2026 PrintCat — Printing Tool by Pram", theme.ForegroundColor())
-	footerText1.Alignment = fyne.TextAlignCenter
-	footerText1.TextSize = 14
+		androidCombinedStatus = widget.NewLabel("")
+		androidCombinedStatus.Wrapping = fyne.TextWrapWord
+		updateCombinedStatusDisplay()
 
-	footerText2 := canvas.NewText("Dedicated to my beloved wife, Apdini Nurrayani", color.Gray{Y: 170})
-	footerText2.Alignment = fyne.TextAlignCenter
-	footerText2.TextSize = 11
+		bottomControls := container.NewVBox(
+			printerSelect,
+			container.NewHBox(refreshButton, configureButton, printButton),
+			androidCombinedStatus,
+		)
 
-	footer := container.NewCenter(
-		container.NewVBox(
-			footerText1,
-			footerText2,
-		),
-	)
+		editorContent = container.NewBorder(
+			topBar,
+			bottomControls,
+			nil,
+			nil,
+			container.NewBorder(
+				toolsToolbar,
+				nil,
+				nil,
+				nil,
+				scroll,
+			),
+		)
+	} else {
+		topBar := container.NewHBox(
+			widget.NewLabel("PrintCat"),
+			widget.NewLabel("|"),
+			widget.NewLabel("Paper:"), paperWidth, widget.NewLabel("mm x"), paperHeight, widget.NewLabel("mm"), paperApply,
+			widget.NewLabel("| Zoom:"), zoomOut, zoomIn, fitButton, zoomLabel,
+		)
 
-	fullLayout := container.NewBorder(nil, footer, nil, nil, content)
+		leftPanel := container.NewVBox(
+			widget.NewLabel("Tools"),
+			container.NewHBox(addText, addImage),
+			container.NewHBox(deleteButton, previewButton),
+			widget.NewSeparator(),
+			printerLabel,
+			container.NewHBox(printerSelect, refreshButton),
+			container.NewHBox(configureButton, printButton),
+			printerStatus,
+			configuredStatus,
+			widget.NewSeparator(),
+			selectedLabel,
+			widget.NewLabel("(drag to move)"),
+		)
 
-	window.SetContent(fullLayout)
+		content := container.NewBorder(topBar, nil, leftPanel, nil, scroll)
+
+		footerText1 := canvas.NewText("© 2026 PrintCat — Printing Tool by Pram", theme.ForegroundColor())
+		footerText1.Alignment = fyne.TextAlignCenter
+		footerText1.TextSize = 14
+
+		footerText2 := canvas.NewText("Dedicated to my beloved wife, Apdini Nurrayani", color.Gray{Y: 120})
+		footerText2.Alignment = fyne.TextAlignCenter
+		footerText2.TextSize = 11
+
+		footer := container.NewCenter(
+			container.NewVBox(
+				footerText1,
+				footerText2,
+			),
+		)
+
+		editorContent = container.NewBorder(nil, footer, nil, nil, content)
+	}
+
+	var homeContent fyne.CanvasObject
+
+	buildScanPrinterScreen := func() fyne.CanvasObject {
+		var scanDevices []platform.Device
+		var selectedScanDevice *platform.Device
+		isScanning := false
+
+		statusLabel := widget.NewLabel("Ready to scan")
+		scanButton := widget.NewButton("Scan", nil)
+
+		deviceList := widget.NewList(
+			func() int {
+				return len(scanDevices)
+			},
+			func() fyne.CanvasObject {
+				return container.NewHBox(
+					widget.NewLabel(""),
+					widget.NewLabel(""),
+				)
+			},
+			func(id widget.ListItemID, obj fyne.CanvasObject) {
+				if id < 0 || id >= len(scanDevices) {
+					return
+				}
+				dev := scanDevices[id]
+				box := obj.(*fyne.Container)
+				if len(box.Objects) >= 2 {
+					nameLabel := box.Objects[0].(*widget.Label)
+					endpointLabel := box.Objects[1].(*widget.Label)
+					nameLabel.Text = dev.Name
+					endpointLabel.Text = dev.Endpoint
+					nameLabel.Refresh()
+					endpointLabel.Refresh()
+				}
+			},
+		)
+
+		deviceList.OnSelected = func(id widget.ListItemID) {
+			if id < 0 || id >= len(scanDevices) {
+				return
+			}
+			selectedScanDevice = &scanDevices[id]
+			statusLabel.SetText(fmt.Sprintf("Selected: %s (%s)", selectedScanDevice.Name, selectedScanDevice.Endpoint))
+			deviceList.Refresh()
+		}
+
+		scanButton.OnTapped = func() {
+			if isScanning {
+				return
+			}
+			isScanning = true
+			scanButton.Disable()
+			statusLabel.SetText("Scanning...")
+			selectedScanDevice = nil
+			scanDevices = nil
+			deviceList.Refresh()
+
+			go func() {
+				ctx := context.Background()
+				discovered, err := discoverBluetoothPrinters(ctx, window)
+
+				fyne.Do(func() {
+					isScanning = false
+					scanButton.Enable()
+
+					if err != nil {
+						statusLabel.SetText(fmt.Sprintf("Error: %v", err))
+						dialog.ShowError(fmt.Errorf("discovery error: %w", err), window)
+						return
+					}
+
+					scanDevices = discovered
+					if len(scanDevices) == 0 {
+						statusLabel.SetText("No printers found")
+					} else {
+						statusLabel.SetText(fmt.Sprintf("Found %d printer(s)", len(scanDevices)))
+					}
+					deviceList.Refresh()
+				})
+			}()
+		}
+
+		return container.NewBorder(
+			container.NewHBox(
+				widget.NewButton("Back", func() {
+					window.SetContent(homeContent)
+				}),
+				widget.NewLabelWithStyle("Scan Printer", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			),
+			nil, nil, nil,
+			container.NewVBox(
+				statusLabel,
+				scanButton,
+				container.NewVBox(
+					widget.NewLabel("Printers:"),
+					deviceList,
+				),
+			),
+		)
+	}
+
+	buildSettingsScreen := func() fyne.CanvasObject {
+		protocolOptions := []string{"ESCPOS", "TSPL", "ZPL", "CPCL", "EPL", "StarPRNT"}
+		protocolSelect := widget.NewSelect(protocolOptions, nil)
+		protocolSelect.SetSelected("ZPL")
+
+		transportDisplayOptions := []string{"TCP", "Bluetooth Classic"}
+		transportSelect := widget.NewSelect(transportDisplayOptions, nil)
+		transportSelect.SetSelected("Bluetooth Classic")
+
+		dpiEntry := widget.NewEntry()
+		dpiEntry.SetText("203")
+		dpiEntry.Validator = func(s string) error {
+			if s == "" {
+				return nil
+			}
+			_, err := strconv.Atoi(s)
+			return err
+		}
+
+		widthEntry := widget.NewEntry()
+		widthEntry.SetText("80")
+		widthEntry.Validator = func(s string) error {
+			if s == "" {
+				return nil
+			}
+			_, err := strconv.Atoi(s)
+			return err
+		}
+
+		heightEntry := widget.NewEntry()
+		heightEntry.SetText("200")
+		heightEntry.Validator = func(s string) error {
+			if s == "" {
+				return nil
+			}
+			_, err := strconv.Atoi(s)
+			return err
+		}
+
+		header := container.NewHBox(
+			widget.NewButton("Back", func() {
+				window.SetContent(homeContent)
+			}),
+			widget.NewLabelWithStyle("Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		)
+
+		body := container.NewVBox(
+			widget.NewLabelWithStyle("Printer", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			container.NewHBox(
+				widget.NewLabel("Protocol"),
+				protocolSelect,
+			),
+			container.NewHBox(
+				widget.NewLabel("Transport"),
+				transportSelect,
+			),
+			container.NewHBox(
+				widget.NewLabel("DPI"),
+				dpiEntry,
+			),
+			widget.NewSeparator(),
+			widget.NewLabelWithStyle("Paper", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			container.NewHBox(
+				widget.NewLabel("Width"),
+				widthEntry,
+				widget.NewLabel("mm"),
+			),
+			container.NewHBox(
+				widget.NewLabel("Height"),
+				heightEntry,
+				widget.NewLabel("mm"),
+			),
+		)
+
+		return container.NewBorder(header, nil, nil, nil, body)
+	}
+
+	buildAddFileScreen := func() fyne.CanvasObject {
+		statusLabel := widget.NewLabel("No file selected")
+		nameLabel := widget.NewLabel("")
+		pathLabel := widget.NewLabel("")
+		typeLabel := widget.NewLabel("")
+		sizeLabel := widget.NewLabel("")
+
+		chooseButton := widget.NewButton("Choose File", nil)
+
+		chooseAnotherButton := widget.NewButton("Choose Another File", nil)
+		chooseAnotherButton.Hide()
+
+		updateFileInfo := func(name, path, ext, sizeStr string) {
+			if name != "" {
+				statusLabel.SetText("Selected File:")
+				nameLabel.SetText(fmt.Sprintf("Name: %s", name))
+				pathLabel.SetText(fmt.Sprintf("Path: %s", path))
+				typeLabel.SetText("Type: Unknown")
+				if sizeStr != "" {
+					sizeLabel.SetText(fmt.Sprintf("Size: %s", sizeStr))
+				} else {
+					sizeLabel.SetText("Size: Unknown")
+				}
+				chooseAnotherButton.Show()
+			} else {
+				statusLabel.SetText("No file selected")
+				nameLabel.SetText("")
+				pathLabel.SetText("")
+				typeLabel.SetText("")
+				sizeLabel.SetText("")
+				chooseAnotherButton.Hide()
+			}
+		}
+
+		openFilePicker := func() {
+			dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
+				if err != nil {
+					statusLabel.SetText("Error selecting file")
+					return
+				}
+				if reader == nil {
+					return
+				}
+				defer reader.Close()
+
+				uri := reader.URI()
+				name := uri.Name()
+				path := uri.Path()
+				ext := uri.Extension()
+
+				var sizeStr string
+				info, err := os.Stat(path)
+				if err == nil {
+					sizeBytes := info.Size()
+					if sizeBytes < 1024 {
+						sizeStr = fmt.Sprintf("%d B", sizeBytes)
+					} else if sizeBytes < 1024*1024 {
+						sizeStr = fmt.Sprintf("%.1f KB", float64(sizeBytes)/1024)
+					} else {
+						sizeStr = fmt.Sprintf("%.1f MB", float64(sizeBytes)/(1024*1024))
+					}
+				}
+
+				updateFileInfo(name, path, ext, sizeStr)
+			}, window)
+		}
+
+		chooseButton.OnTapped = openFilePicker
+
+		chooseAnotherButton.OnTapped = openFilePicker
+
+		header := container.NewHBox(
+			widget.NewButton("Back", func() {
+				window.SetContent(homeContent)
+			}),
+			widget.NewLabelWithStyle("Add File", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		)
+
+		body := container.NewVBox(
+			statusLabel,
+			chooseButton,
+			chooseAnotherButton,
+			widget.NewSeparator(),
+			nameLabel,
+			pathLabel,
+			typeLabel,
+			sizeLabel,
+		)
+
+		return container.NewBorder(header, nil, nil, nil, body)
+	}
+
+	buildHomeScreen := func() fyne.CanvasObject {
+		return container.NewCenter(
+			container.NewVBox(
+				widget.NewLabelWithStyle("PrintCat", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+				widget.NewButton("Settings", func() {
+					settingsContent := buildSettingsScreen()
+					window.SetContent(settingsContent)
+				}),
+				widget.NewButton("Scan Printer", func() {
+					scanContent := buildScanPrinterScreen()
+					window.SetContent(scanContent)
+				}),
+				widget.NewButton("Add File", func() {
+					addFileContent := buildAddFileScreen()
+					window.SetContent(addFileContent)
+				}),
+				widget.NewButton("Blank Canvas", func() {
+					window.SetContent(editorContent)
+				}),
+			),
+		)
+	}
+
+	if runtime.GOOS == "android" {
+		homeContent = buildHomeScreen()
+		window.SetContent(homeContent)
+	} else {
+		window.SetContent(editorContent)
+	}
+
 	return window
 }
 

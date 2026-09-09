@@ -1,32 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.printcat.app">
+    package="dev.printcat.app">
 
-    <!-- Permission dasar yang dibutuhkan Fyne dan PrintCat -->
+    <!-- Permission dasar Fyne -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Bluetooth permissions untuk Android <= 11 -->
+    <!-- Bluetooth Legacy (Android <= 11) -->
     <uses-permission android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
 
-    <!-- Bluetooth Scan untuk Android 12+ (active discovery) -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
-        android:usesPermissionFlags="neverForLocation" />
-
-    <!-- Bluetooth Connect untuk Android 12+ (interaksi/koneksi) -->
+    <!-- Bluetooth Modern (Android 12+) -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- Location permission untuk Android 10-11 (diperlukan untuk scan) -->
+    <!-- Location (Android 10-11) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
 
-    <!-- Fitur Bluetooth (tidak wajib) -->
     <uses-feature android:name="android.hardware.bluetooth"
         android:required="false" />
+
+    <application
+        android:label="PrintCat"
+        android:debuggable="true"
+        android:hasCode="false">
+        <activity
+            android:name="org.golang.app.GoNativeActivity"
+            android:label="PrintCat"
+            android:configChanges="0xa0">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="main" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
 
 </manifest>
