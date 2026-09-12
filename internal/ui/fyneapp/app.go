@@ -6,6 +6,7 @@ import (
 	"image/color"
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 	"os"
 	"runtime"
 	"strconv"
@@ -113,6 +114,15 @@ func NewWindow(application fyne.App) fyne.Window {
 	var androidCombinedStatus *widget.Label
 	var updateCombinedStatusDisplay func()
 
+	var pendingFilePath string
+	var pendingFileData []byte
+	var pendingFileInfo struct {
+		Name string
+		Path string
+		Ext  string
+		Size string
+	}
+
 	selectedLabel := widget.NewLabel("Selected: none")
 	canvasWidget := NewCanvas(ed, func(id string) {
 		if id == "" {
@@ -162,36 +172,68 @@ func NewWindow(application fyne.App) fyne.Window {
 		}
 	})
 
-	addText := widget.NewButton("Add Text", func() {
-		pos := document.Point{X: 10_000, Y: 10_000}
-		size := document.Size{Width: 40_000, Height: 10_000}
-		ed.AddText("Hello", pos, size, 12_000)
-		canvasWidget.Refresh()
-	})
+	var addText *widget.Button
+	var addImage *widget.Button
+	var deleteButton *widget.Button
+	var previewButton *widget.Button
 
-	addImage := widget.NewButton("Add Image", func() {
-		dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
-			if err != nil || reader == nil {
-				return
-			}
-			defer reader.Close()
-			data, err := os.ReadFile(reader.URI().Path())
-			if err != nil {
-				return
-			}
-			ed.AddImage(data, "image/png", document.Point{X: 20_000, Y: 20_000}, document.Size{Width: 40_000, Height: 30_000})
+	if runtime.GOOS == "android" {
+		addText = widget.NewButton("Text", func() {
+			pos := document.Point{X: 10_000, Y: 10_000}
+			size := document.Size{Width: 40_000, Height: 10_000}
+			ed.AddText("Hello", pos, size, 12_000)
 			canvasWidget.Refresh()
-		}, window)
-	})
-
-	deleteButton := widget.NewButton("Delete", func() {
-		ed.DeleteSelected()
-		canvasWidget.Refresh()
-	})
-
-	previewButton := widget.NewButton("Preview", func() {
-		ShowPreview(application, ed)
-	})
+		})
+		addImage = widget.NewButton("Image", func() {
+			dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
+				if err != nil || reader == nil {
+					return
+				}
+				defer reader.Close()
+				data, err := io.ReadAll(reader)
+				if err != nil {
+					return
+				}
+				ed.AddImage(data, "image/png", document.Point{X: 20_000, Y: 20_000}, document.Size{Width: 40_000, Height: 30_000})
+				canvasWidget.Refresh()
+			}, window)
+		})
+		deleteButton = widget.NewButton("Del", func() {
+			ed.DeleteSelected()
+			canvasWidget.Refresh()
+		})
+		previewButton = widget.NewButton("Prev", func() {
+			ShowPreview(application, ed)
+		})
+	} else {
+		addText = widget.NewButton("Add Text", func() {
+			pos := document.Point{X: 10_000, Y: 10_000}
+			size := document.Size{Width: 40_000, Height: 10_000}
+			ed.AddText("Hello", pos, size, 12_000)
+			canvasWidget.Refresh()
+		})
+		addImage = widget.NewButton("Add Image", func() {
+			dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
+				if err != nil || reader == nil {
+					return
+				}
+				defer reader.Close()
+				data, err := os.ReadFile(reader.URI().Path())
+				if err != nil {
+					return
+				}
+				ed.AddImage(data, "image/png", document.Point{X: 20_000, Y: 20_000}, document.Size{Width: 40_000, Height: 30_000})
+				canvasWidget.Refresh()
+			}, window)
+		})
+		deleteButton = widget.NewButton("Delete", func() {
+			ed.DeleteSelected()
+			canvasWidget.Refresh()
+		})
+		previewButton = widget.NewButton("Preview", func() {
+			ShowPreview(application, ed)
+		})
+	}
 
 	var devices []platform.Device
 	var selectedDevice *platform.Device
@@ -255,8 +297,12 @@ func NewWindow(application fyne.App) fyne.Window {
 			if selText == "" || selText == "Selected: none" {
 				selText = "No selection"
 			}
+			fileStatus := ""
+			if pendingFilePath != "" && pendingFileInfo.Name != "" {
+				fileStatus = " | File: " + pendingFileInfo.Name
+			}
 			if statusStr != "" {
-				androidCombinedStatus.SetText("Status:" + statusStr + " | " + selText + " (drag to move)")
+				androidCombinedStatus.SetText("Status:" + statusStr + fileStatus + " | " + selText + " (drag to move)")
 			} else {
 				androidCombinedStatus.SetText(selText + " (drag to move)")
 			}
@@ -564,9 +610,13 @@ func NewWindow(application fyne.App) fyne.Window {
 	refreshDevices()
 
 	var editorContent *fyne.Container
+	var homeContent fyne.CanvasObject
 
 	if runtime.GOOS == "android" {
 		topBar := container.NewHBox(
+			widget.NewButton("←", func() {
+				window.SetContent(homeContent)
+			}),
 			widget.NewLabel("PrintCat"),
 			layout.NewSpacer(),
 			zoomOut, zoomIn, fitButton, zoomLabel,
@@ -639,8 +689,6 @@ func NewWindow(application fyne.App) fyne.Window {
 
 		editorContent = container.NewBorder(nil, footer, nil, nil, content)
 	}
-
-	var homeContent fyne.CanvasObject
 
 	buildScanPrinterScreen := func() fyne.CanvasObject {
 		var scanDevices []platform.Device
@@ -827,6 +875,9 @@ func NewWindow(application fyne.App) fyne.Window {
 
 		chooseButton := widget.NewButton("Choose File", nil)
 
+		openInEditorButton := widget.NewButton("Open in Editor", nil)
+		openInEditorButton.Hide()
+
 		chooseAnotherButton := widget.NewButton("Choose Another File", nil)
 		chooseAnotherButton.Hide()
 
@@ -841,6 +892,7 @@ func NewWindow(application fyne.App) fyne.Window {
 				} else {
 					sizeLabel.SetText("Size: Unknown")
 				}
+				openInEditorButton.Show()
 				chooseAnotherButton.Show()
 			} else {
 				statusLabel.SetText("No file selected")
@@ -848,6 +900,7 @@ func NewWindow(application fyne.App) fyne.Window {
 				pathLabel.SetText("")
 				typeLabel.SetText("")
 				sizeLabel.SetText("")
+				openInEditorButton.Hide()
 				chooseAnotherButton.Hide()
 			}
 		}
@@ -869,8 +922,8 @@ func NewWindow(application fyne.App) fyne.Window {
 				ext := uri.Extension()
 
 				var sizeStr string
-				info, err := os.Stat(path)
-				if err == nil {
+				info, statErr := os.Stat(path)
+				if statErr == nil {
 					sizeBytes := info.Size()
 					if sizeBytes < 1024 {
 						sizeStr = fmt.Sprintf("%d B", sizeBytes)
@@ -881,6 +934,19 @@ func NewWindow(application fyne.App) fyne.Window {
 					}
 				}
 
+				data, readErr := io.ReadAll(reader)
+				if readErr != nil {
+					statusLabel.SetText("Error reading file")
+					return
+				}
+
+				pendingFilePath = path
+				pendingFileData = data
+				pendingFileInfo.Name = name
+				pendingFileInfo.Path = path
+				pendingFileInfo.Ext = ext
+				pendingFileInfo.Size = sizeStr
+
 				updateFileInfo(name, path, ext, sizeStr)
 			}, window)
 		}
@@ -888,6 +954,17 @@ func NewWindow(application fyne.App) fyne.Window {
 		chooseButton.OnTapped = openFilePicker
 
 		chooseAnotherButton.OnTapped = openFilePicker
+
+		openInEditorButton.OnTapped = func() {
+			if pendingFilePath != "" {
+				if len(pendingFileData) > 0 {
+					ed.AddImage(pendingFileData, "image/png", document.Point{X: 20_000, Y: 20_000}, document.Size{Width: 40_000, Height: 30_000})
+					canvasWidget.Refresh()
+				}
+				updateCombinedStatusDisplay()
+				window.SetContent(editorContent)
+			}
+		}
 
 		header := container.NewHBox(
 			widget.NewButton("Back", func() {
@@ -899,6 +976,7 @@ func NewWindow(application fyne.App) fyne.Window {
 		body := container.NewVBox(
 			statusLabel,
 			chooseButton,
+			openInEditorButton,
 			chooseAnotherButton,
 			widget.NewSeparator(),
 			nameLabel,
@@ -911,25 +989,61 @@ func NewWindow(application fyne.App) fyne.Window {
 	}
 
 	buildHomeScreen := func() fyne.CanvasObject {
-		return container.NewCenter(
+		title := canvas.NewText("PrintCat", color.Black)
+		title.Alignment = fyne.TextAlignCenter
+		title.TextSize = 28
+		title.TextStyle = fyne.TextStyle{Bold: true}
+
+		menu := container.NewVBox(
+			widget.NewButton("Settings", func() {
+				settingsContent := buildSettingsScreen()
+				window.SetContent(settingsContent)
+			}),
+			widget.NewButton("Scan Printer", func() {
+				scanContent := buildScanPrinterScreen()
+				window.SetContent(scanContent)
+			}),
+			widget.NewButton("Add File", func() {
+				addFileContent := buildAddFileScreen()
+				window.SetContent(addFileContent)
+			}),
+			widget.NewButton("Blank Canvas", func() {
+				pendingFilePath = ""
+				pendingFileData = nil
+				pendingFileInfo = struct{ Name, Path, Ext, Size string }{}
+				updateCombinedStatusDisplay()
+				window.SetContent(editorContent)
+			}),
+		)
+
+		content := container.NewCenter(
 			container.NewVBox(
-				widget.NewLabelWithStyle("PrintCat", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-				widget.NewButton("Settings", func() {
-					settingsContent := buildSettingsScreen()
-					window.SetContent(settingsContent)
-				}),
-				widget.NewButton("Scan Printer", func() {
-					scanContent := buildScanPrinterScreen()
-					window.SetContent(scanContent)
-				}),
-				widget.NewButton("Add File", func() {
-					addFileContent := buildAddFileScreen()
-					window.SetContent(addFileContent)
-				}),
-				widget.NewButton("Blank Canvas", func() {
-					window.SetContent(editorContent)
-				}),
+				title,
+				widget.NewLabel(""),
+				menu,
 			),
+		)
+
+		footerText1 := canvas.NewText("© 2026 PrintCat — Printing Tool by Pram", color.Gray{Y: 80})
+		footerText1.Alignment = fyne.TextAlignCenter
+		footerText1.TextSize = 14
+
+		footerText2 := canvas.NewText("Dedicated to my beloved wife, Apdini Nurrayani", color.Gray{Y: 120})
+		footerText2.Alignment = fyne.TextAlignCenter
+		footerText2.TextSize = 11
+
+		footer := container.NewCenter(
+			container.NewVBox(
+				footerText1,
+				footerText2,
+			),
+		)
+
+		return container.NewBorder(
+			nil,
+			footer,
+			nil, nil,
+			content,
 		)
 	}
 
