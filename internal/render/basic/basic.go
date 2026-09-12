@@ -191,8 +191,33 @@ func (r *Renderer) renderImage(img *image.Gray, dpi int, bounds document.Rect, i
 	pxMaxX = min(pxMaxX, img.Bounds().Dx())
 	pxMaxY = min(pxMaxY, img.Bounds().Dy())
 	dstRect := image.Rect(pxMinX, pxMinY, pxMaxX, pxMaxY)
-
+	dstRect = containedRect(dstRect, src.Bounds())
 	draw.ApproxBiLinear.Scale(img, dstRect, src, src.Bounds(), draw.Src, nil)
+}
+
+// containedRect returns the largest rectangle inside dst with src's aspect
+// ratio. Image elements describe their allocated document area; preserving the
+// source ratio here prevents protocol output from stretching imported labels
+// when a document is created by a source other than the editor.
+func containedRect(dst, src image.Rectangle) image.Rectangle {
+	dstWidth, dstHeight := dst.Dx(), dst.Dy()
+	srcWidth, srcHeight := src.Dx(), src.Dy()
+	if dstWidth <= 0 || dstHeight <= 0 || srcWidth <= 0 || srcHeight <= 0 {
+		return dst
+	}
+
+	width := dstWidth
+	height := width * srcHeight / srcWidth
+	if height > dstHeight {
+		height = dstHeight
+		width = height * srcWidth / srcHeight
+	}
+	return image.Rect(
+		dst.Min.X+(dstWidth-width)/2,
+		dst.Min.Y+(dstHeight-height)/2,
+		dst.Min.X+(dstWidth-width)/2+width,
+		dst.Min.Y+(dstHeight-height)/2+height,
+	)
 }
 
 func max(a, b int) int {
