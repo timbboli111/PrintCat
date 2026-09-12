@@ -109,6 +109,36 @@ func TestImageRendering(t *testing.T) {
 	}
 }
 
+func TestImageRenderingPreservesAspectRatio(t *testing.T) {
+	r := &Renderer{}
+	doc := document.New("test", "test", document.Size{Width: 40_000, Height: 40_000})
+
+	img := image.NewGray(image.Rect(0, 0, 20, 10))
+	for i := range img.Pix {
+		img.Pix[i] = 0
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	doc.Elements = append(doc.Elements, document.NewImageElement("img1", buf.Bytes(), "image/png", document.Rect{
+		Size: document.Size{Width: 20_000, Height: 20_000},
+	}))
+
+	ras, err := r.Render(context.Background(), doc, render.Target{DPI: 254})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	// 20 mm becomes 200 pixels at 254 DPI. A 2:1 source occupies 200x100
+	// pixels, centred vertically in its square allocation.
+	if ras.Pixels[10*ras.Width+10] != 255 {
+		t.Error("top letterbox area is not white")
+	}
+	if ras.Pixels[100*ras.Width+10] != 0 {
+		t.Error("contained image area is not black")
+	}
+}
+
 func TestInvalidImageData(t *testing.T) {
 	r := &Renderer{}
 	doc := document.New("test", "test", document.Size{Width: 80000, Height: 100000})

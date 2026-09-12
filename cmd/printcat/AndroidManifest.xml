@@ -28,7 +28,7 @@
     <application
         android:label="PrintCat"
         android:debuggable="true"
-        android:hasCode="false">
+        android:hasCode="true">
         <activity
             android:name="org.golang.app.GoNativeActivity"
             android:label="PrintCat"
@@ -41,6 +41,19 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name="com.printcat.app.PrintCatPrintService"
+            android:label="PrintCat"
+            android:exported="true"
+            android:permission="android.permission.BIND_PRINT_SERVICE">
+            <intent-filter>
+                <action android:name="android.printservice.PrintService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.printservice"
+                android:resource="@xml/printcat_print_service" />
+        </service>
     </application>
 
 </manifest>
