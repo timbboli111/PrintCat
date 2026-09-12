@@ -97,7 +97,9 @@ func (c *CanvasWidget) makeObject(el document.Element) fyne.CanvasObject {
 		if err != nil {
 			return canvas.NewRectangle(color.Gray{Y: 200})
 		}
-		return canvas.NewImageFromImage(img)
+		preview := canvas.NewImageFromImage(img)
+		preview.FillMode = canvas.ImageFillContain
+		return preview
 	default:
 		return canvas.NewRectangle(color.Gray{Y: 200})
 	}
