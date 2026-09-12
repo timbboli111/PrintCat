@@ -194,7 +194,10 @@ func NewWindow(application fyne.App) fyne.Window {
 				if err != nil {
 					return
 				}
-				ed.AddImage(data, "image/png", document.Point{X: 20_000, Y: 20_000}, document.Size{Width: 40_000, Height: 30_000})
+				if err := ed.AddImageFitToPage(data, "image/png"); err != nil {
+					dialog.ShowError(fmt.Errorf("open image: %w", err), window)
+					return
+				}
 				canvasWidget.Refresh()
 			}, window)
 		})
@@ -222,7 +225,10 @@ func NewWindow(application fyne.App) fyne.Window {
 				if err != nil {
 					return
 				}
-				ed.AddImage(data, "image/png", document.Point{X: 20_000, Y: 20_000}, document.Size{Width: 40_000, Height: 30_000})
+				if err := ed.AddImageFitToPage(data, "image/png"); err != nil {
+					dialog.ShowError(fmt.Errorf("open image: %w", err), window)
+					return
+				}
 				canvasWidget.Refresh()
 			}, window)
 		})

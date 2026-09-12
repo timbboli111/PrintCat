@@ -1,7 +1,10 @@
 package editor
 
 import (
+	"bytes"
 	"github.com/timboli111/PrintCat/internal/document"
+	"image"
+	"image/png"
 	"testing"
 )
 
@@ -79,4 +82,58 @@ func TestSetPaperSizeInvalid(t *testing.T) {
 	if ed.Doc.PageSize.Width != 60000 || ed.Doc.PageSize.Height != 120000 {
 		t.Errorf("valid paper size not set")
 	}
+}
+
+func TestAddImageFitToPagePreservesAspectRatioAndCentresImage(t *testing.T) {
+	doc := document.New("test", "test", document.Size{Width: 80_000, Height: 200_000})
+	ed := New(&doc)
+
+	data := pngData(t, 400, 200)
+	if err := ed.AddImageFitToPage(data, "image/png"); err != nil {
+		t.Fatalf("AddImageFitToPage() error = %v", err)
+	}
+
+	if len(doc.Elements) != 1 {
+		t.Fatalf("elements = %d, want 1", len(doc.Elements))
+	}
+	bounds := doc.Elements[0].Bounds
+	if bounds.Size.Width != 70_000 || bounds.Size.Height != 35_000 {
+		t.Errorf("image size = %dx%d, want 70000x35000", bounds.Size.Width, bounds.Size.Height)
+	}
+	if bounds.Position.X != 5_000 || bounds.Position.Y != 82_500 {
+		t.Errorf("image position = (%d,%d), want (5000,82500)", bounds.Position.X, bounds.Position.Y)
+	}
+}
+
+func TestAddImageFitToPageUsesHeightForTallImages(t *testing.T) {
+	doc := document.New("test", "test", document.Size{Width: 80_000, Height: 100_000})
+	ed := New(&doc)
+
+	if err := ed.AddImageFitToPage(pngData(t, 100, 200), "image/png"); err != nil {
+		t.Fatalf("AddImageFitToPage() error = %v", err)
+	}
+	bounds := doc.Elements[0].Bounds
+	if bounds.Size.Width != 45_000 || bounds.Size.Height != 90_000 {
+		t.Errorf("image size = %dx%d, want 45000x90000", bounds.Size.Width, bounds.Size.Height)
+	}
+	if bounds.Position.X != 17_500 || bounds.Position.Y != 5_000 {
+		t.Errorf("image position = (%d,%d), want (17500,5000)", bounds.Position.X, bounds.Position.Y)
+	}
+}
+
+func TestAddImageFitToPageRejectsInvalidData(t *testing.T) {
+	doc := document.New("test", "test", document.Size{Width: 80_000, Height: 100_000})
+	ed := New(&doc)
+	if err := ed.AddImageFitToPage([]byte("not an image"), "image/png"); err == nil {
+		t.Fatal("AddImageFitToPage() unexpectedly accepted invalid data")
+	}
+}
+
+func pngData(t *testing.T, width, height int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewGray(image.Rect(0, 0, width, height))); err != nil {
+		t.Fatalf("png.Encode() error = %v", err)
+	}
+	return buf.Bytes()
 }
