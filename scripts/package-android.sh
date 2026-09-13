@@ -109,6 +109,7 @@ unzip -q "$FYNE_APK" classes.dex -d "$WORK_DIR/fyne-dex"
 "$D8" --min-api 19 --lib "$ANDROID_JAR" --output "$DEX_DIR" \
     "$WORK_DIR/fyne-dex/classes.dex" "$JAVA_CLASSES"
 
+cp "$MANIFEST" "$FINAL_MANIFEST"
 # Fyne adds its icon while building the initial APK. Recreate that resource in
 # the final aapt2-linked manifest so adding PrintService resources does not
 # change the existing launcher icon.
