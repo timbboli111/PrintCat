@@ -62,7 +62,8 @@ readonly JAVA_CLASSES="$WORK_DIR/java-classes"
 readonly DEX_DIR="$WORK_DIR/dex"
 readonly COMPILED_RESOURCES="$WORK_DIR/resources.zip"
 readonly RESOURCE_APK="$WORK_DIR/resources.apk"
-readonly FINAL_MANIFEST="$WORK_DIR/AndroidManifest.xml"
+readonly BASE_MANIFEST="$WORK_DIR/base-AndroidManifest.xml"
+readonly FINAL_MANIFEST="$WORK_DIR/final-AndroidManifest.xml"
 readonly FINAL_RESOURCES="$WORK_DIR/res"
 readonly APK_CONTENTS="$WORK_DIR/apk-contents"
 readonly UNSIGNED_APK="$WORK_DIR/unsigned.apk"
@@ -70,15 +71,40 @@ readonly ALIGNED_APK="$WORK_DIR/aligned.apk"
 
 mkdir -p "$JAVA_CLASSES" "$DEX_DIR" "$APK_CONTENTS"
 
-cd "$ROOT_DIR"
-"$FYNE_BIN" package -os android -appID "$APP_ID" -name "$APP_NAME" -icon assets/Icon.png -o "$FYNE_APK" ./cmd/printcat
+cp "$MANIFEST" "$FINAL_MANIFEST"
+python3 - "$FINAL_MANIFEST" "$BASE_MANIFEST" <<'PY'
+from pathlib import Path
+import sys
+import xml.etree.ElementTree as ET
 
-mapfile -d '' -t JAVA_SOURCES < <(find "$JAVA_SOURCE_ROOT" -type f -name '*.java' -print0 | sort -z)
-if [[ ${#JAVA_SOURCES[@]} -eq 0 ]]; then
-    printf 'No Android Java sources found under: %s\n' "$JAVA_SOURCE_ROOT" >&2
-    exit 1
-fi
-javac --release 8 -classpath "$ANDROID_JAR" -d "$JAVA_CLASSES" "${JAVA_SOURCES[@]}"
+android = "{http://schemas.android.com/apk/res/android}"
+tree = ET.parse(sys.argv[1])
+application = tree.getroot().find("application")
+for service in list(application.findall("service")):
+    if service.get(android + "name") == "com.printcat.app.PrintCatPrintService":
+        application.remove(service)
+tree.write(sys.argv[2], encoding="utf-8", xml_declaration=True)
+PY
+
+# Fyne 2.6.3 only understands the base manifest/resource set. Temporarily
+# supply the base manifest, then restore the final source manifest before any
+# Android SDK post-processing occurs.
+cp "$BASE_MANIFEST" "$MANIFEST"
+restore_manifest() {
+    cp "$FINAL_MANIFEST" "$MANIFEST"
+}
+trap 'restore_manifest; rm -rf "$WORK_DIR"' EXIT
+(
+    cd "$PACKAGE_DIR"
+    rm -f "$APP_NAME.apk"
+    "$FYNE_BIN" package -os android -appID "$APP_ID" -name "$APP_NAME" -icon ../../assets/Icon.png
+    test -f "$APP_NAME.apk"
+    mv "$APP_NAME.apk" "$FYNE_APK"
+)
+restore_manifest
+
+javac --release 8 -classpath "$ANDROID_JAR" -d "$JAVA_CLASSES" \
+    "$JAVA_SOURCE_ROOT/src/main/java/com/printcat/app/PrintCatPrintService.java"
 unzip -q "$FYNE_APK" classes.dex -d "$WORK_DIR/fyne-dex"
 "$D8" --min-api 19 --lib "$ANDROID_JAR" --output "$DEX_DIR" \
     "$WORK_DIR/fyne-dex/classes.dex" "$JAVA_CLASSES"
