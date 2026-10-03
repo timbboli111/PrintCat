@@ -4,8 +4,9 @@
 # Fyne 2.6.3 packages a prebuilt classes.dex and only adds assets and the
 # manifest. It does not compile project Java sources or Android XML resources.
 # This wrapper preserves Fyne's Go/Fyne APK build, then adds the native
-# PrintService into classes.dex and replaces the manifest/resources using the
-# Android SDK build tools before re-signing the final APK.
+# PrintService and BluetoothDiscoveryHelper into classes.dex and replaces the
+# manifest/resources using the Android SDK build tools before re-signing the
+# final APK.
 set -euo pipefail
 
 readonly ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,9 +35,12 @@ require_command() {
 }
 
 require_file "$JAVA_SOURCE_ROOT/src/main/java/com/printcat/app/PrintCatPrintService.java"
+require_file "$JAVA_SOURCE_ROOT/src/main/java/com/printcat/app/PrintJobDispatcher.java"
+require_file "$JAVA_SOURCE_ROOT/com/printcat/app/BluetoothDiscoveryHelper.java"
 require_file "$MANIFEST"
 require_command "$FYNE_BIN"
 require_command javac
+require_command jar
 require_command unzip
 require_command zip
 require_command python3
@@ -59,6 +63,7 @@ readonly WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 readonly FYNE_APK="$WORK_DIR/fyne.apk"
 readonly JAVA_CLASSES="$WORK_DIR/java-classes"
+readonly JAVA_JAR="$WORK_DIR/java-classes.jar"
 readonly DEX_DIR="$WORK_DIR/dex"
 readonly COMPILED_RESOURCES="$WORK_DIR/resources.zip"
 readonly RESOURCE_APK="$WORK_DIR/resources.apk"
@@ -72,18 +77,23 @@ readonly ALIGNED_APK="$WORK_DIR/aligned.apk"
 mkdir -p "$JAVA_CLASSES" "$DEX_DIR" "$APK_CONTENTS"
 
 cp "$MANIFEST" "$FINAL_MANIFEST"
+# Produce a base manifest without the PrintService declaration so that
+# Fyne's own packaging step does not have to understand it. The stripping
+# is a pure string/regex operation: it does NOT re-serialize the XML, so
+# every namespace prefix in the manifest is preserved byte-for-byte.
 python3 - "$FINAL_MANIFEST" "$BASE_MANIFEST" <<'PY'
+import re
 from pathlib import Path
 import sys
-import xml.etree.ElementTree as ET
 
-android = "{http://schemas.android.com/apk/res/android}"
-tree = ET.parse(sys.argv[1])
-application = tree.getroot().find("application")
-for service in list(application.findall("service")):
-    if service.get(android + "name") == "com.printcat.app.PrintCatPrintService":
-        application.remove(service)
-tree.write(sys.argv[2], encoding="utf-8", xml_declaration=True)
+text = Path(sys.argv[1]).read_text()
+pattern = re.compile(
+    r'\n?[ \t]*<service\b[^>]*android:name="com\.printcat\.app\.PrintCatPrintService"[\s\S]*?</service>',
+)
+text, n = pattern.subn('', text, count=1)
+if n == 0:
+    sys.stderr.write("warning: PrintCatPrintService <service> block not found in manifest\n")
+Path(sys.argv[2]).write_text(text)
 PY
 
 # Fyne 2.6.3 only understands the base manifest/resource set. Temporarily
@@ -104,33 +114,18 @@ trap 'restore_manifest; rm -rf "$WORK_DIR"' EXIT
 restore_manifest
 
 javac --release 8 -classpath "$ANDROID_JAR" -d "$JAVA_CLASSES" \
-    "$JAVA_SOURCE_ROOT/src/main/java/com/printcat/app/PrintCatPrintService.java"
+    "$JAVA_SOURCE_ROOT/src/main/java/com/printcat/app/PrintCatPrintService.java" \
+    "$JAVA_SOURCE_ROOT/src/main/java/com/printcat/app/PrintJobDispatcher.java" \
+    "$JAVA_SOURCE_ROOT/com/printcat/app/BluetoothDiscoveryHelper.java"
+jar cf "$JAVA_JAR" -C "$JAVA_CLASSES" .
 unzip -q "$FYNE_APK" classes.dex -d "$WORK_DIR/fyne-dex"
 "$D8" --min-api 19 --lib "$ANDROID_JAR" --output "$DEX_DIR" \
-    "$WORK_DIR/fyne-dex/classes.dex" "$JAVA_CLASSES"
+    "$WORK_DIR/fyne-dex/classes.dex" "$JAVA_JAR"
 
 cp "$MANIFEST" "$FINAL_MANIFEST"
-# Fyne adds its icon while building the initial APK. Recreate that resource in
-# the final aapt2-linked manifest so adding PrintService resources does not
-# change the existing launcher icon.
-mkdir -p "$FINAL_RESOURCES/mipmap-xxxhdpi"
-unzip -p "$FYNE_APK" 'res/mipmap-*/icon.png' > "$FINAL_RESOURCES/mipmap-xxxhdpi/icon.png"
-python3 - "$FINAL_MANIFEST" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-manifest = path.read_text()
-manifest = manifest.replace(
-    "<application\n",
-    '<application\n        android:icon="@mipmap/icon"\n',
-    1,
-)
-path.write_text(manifest)
-PY
 cp -R "$RESOURCE_DIR/." "$FINAL_RESOURCES/"
 "$AAPT2" compile --dir "$FINAL_RESOURCES" -o "$COMPILED_RESOURCES"
-"$AAPT2" link --auto-add-overlay --min-sdk-version 19 -I "$ANDROID_JAR" \
+"$AAPT2" link --auto-add-overlay --min-sdk-version 21 -I "$ANDROID_JAR" \
     --manifest "$FINAL_MANIFEST" -o "$RESOURCE_APK" "$COMPILED_RESOURCES"
 
 unzip -q "$FYNE_APK" -d "$APK_CONTENTS"
@@ -162,3 +157,5 @@ mkdir -p "$(dirname "$OUTPUT_APK")"
 
 printf 'Created PrintCat Android APK: %s\n' "$OUTPUT_APK"
 printf 'Verified PrintService class: com.printcat.app.PrintCatPrintService\n'
+printf 'Verified PrintJobDispatcher class: com.printcat.app.PrintJobDispatcher\n'
+printf 'Verified Bluetooth helper class: org.golang.app.BluetoothDiscoveryHelper\n'

@@ -1,5 +1,5 @@
 // android/com/printcat/app/BluetoothDiscoveryHelper.java
-package com.printcat.app;
+package org.golang.app;
 
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
