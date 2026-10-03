@@ -8,6 +8,7 @@ import (
 	_ "image/png"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"time"
@@ -21,6 +22,8 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/timboli111/PrintCat/internal/bridge"
+	"github.com/timboli111/PrintCat/internal/config"
 	"github.com/timboli111/PrintCat/internal/document"
 	"github.com/timboli111/PrintCat/internal/editor"
 	"github.com/timboli111/PrintCat/internal/platform"
@@ -108,6 +111,19 @@ func NewWindow(application fyne.App) fyne.Window {
 	}
 
 	renderer := &basic.Renderer{}
+
+	// Step 1A: publish the shared engine to the process-wide bridge state so
+	// that the Android PrintService path (JNI -> bridge.Submit) can reach the
+	// same printer.Service and renderer that the Fyne UI uses. A single
+	// printer.Service instance is used by both paths.
+	bridgeState := bridge.NewState(service, renderer)
+	bridge.SetGlobal(bridgeState)
+
+	configPath := filepath.Join(application.Storage().RootURI().Path(), "config.json")
+	if cfg, err := config.Load(configPath); err == nil && cfg.ActivePrinter != nil {
+		bridgeState.SetActivePrinter(cfg.ActivePrinter)
+	}
+
 	doc := document.New("doc1", "My Document", document.Size{Width: 80_000, Height: 200_000})
 	ed := editor.New(&doc)
 
@@ -504,7 +520,21 @@ func NewWindow(application fyne.App) fyne.Window {
 				return
 			}
 
+			// Step 1A: persist the active printer so that the Android
+			// PrintService path can route external jobs even when the UI is
+			// not open, and publish it to the bridge state.
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				cfg = config.Default()
+			}
+			cfg.ActivePrinter = cfgPrinter
+			if err := config.Save(configPath, cfg); err != nil {
+				errorLabel.SetText(fmt.Sprintf("Failed to save config: %v", err))
+				return
+			}
+
 			configuredPrinter = cfgPrinter
+			bridgeState.SetActivePrinter(cfgPrinter)
 			updateConfiguredStatus()
 			configWindow.Close()
 		})
