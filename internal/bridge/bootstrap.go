@@ -105,12 +105,14 @@ func loadActivePrinterFromConfig(state *State, configPath string) {
 		return
 	}
 	p := active.Printer
-	state.SetActivePrinter(&p)
-	log.Printf("[bridge] active printer loaded from %s: id=%q name=%q protocol=%s transport=%s endpoint=%s",
+	state.SetActivePrinterWithPaper(&p, active.PaperWidthMm, active.PaperHeightMm)
+	log.Printf("[bridge] active printer loaded from %s: id=%q name=%q protocol=%s transport=%s endpoint=%s paper=%dx%dmm",
 		configPath,
 		p.ID,
 		p.Name,
 		p.Connection.Protocol,
 		p.Connection.Transport,
-		p.Connection.Endpoint)
+		p.Connection.Endpoint,
+		active.PaperWidthMm,
+		active.PaperHeightMm)
 }

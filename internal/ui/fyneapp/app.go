@@ -46,6 +46,8 @@ func discoverBluetoothPrinters(ctx context.Context, window fyne.Window) ([]platf
 		return nil, nil
 	}
 
+	// Bluetooth Connect and Scan permissions are the modern (API 31+) ones.
+	// On API < 31 they are no-ops.
 	if platform.GetAndroidAPIVersion() >= 31 {
 		connectGranted, err := platform.EnsureBluetoothConnectPermission(ctx)
 		if err != nil {
@@ -62,6 +64,20 @@ func discoverBluetoothPrinters(ctx context.Context, window fyne.Window) ([]platf
 	}
 	if !scanGranted {
 		return nil, fmt.Errorf("bluetooth scan permission denied")
+	}
+
+	// ACCESS_FINE_LOCATION: on API 24-30 this is already covered by
+	// EnsureBluetoothScanPermission above; ensureFineLocationPermission
+	// returns true immediately there. On API 31+ some OEM ROMs (MIUI /
+	// Redmi) still require it before startDiscovery() will succeed, even
+	// though AOSP does not. We request it here, before discovery, and
+	// verify it is really granted.
+	fineGranted, err := platform.EnsureFineLocationPermission(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("location permission error: %w", err)
+	}
+	if !fineGranted {
+		return nil, fmt.Errorf("location permission denied")
 	}
 
 	integration := platform.GetIntegration()
@@ -152,7 +168,7 @@ func NewWindow(application fyne.App) fyne.Window {
 		initialActive = sp.Printer
 		hasInitialActive = true
 		pCopy := initialActive
-		bridgeState.SetActivePrinter(&pCopy)
+		bridgeState.SetActivePrinterWithPaper(&pCopy, sp.PaperWidthMm, sp.PaperHeightMm)
 	}
 
 	doc := document.New("doc1", "My Document", document.Size{
@@ -160,15 +176,6 @@ func NewWindow(application fyne.App) fyne.Window {
 		Height: document.Unit(initialHeight),
 	})
 	ed := editor.New(&doc)
-
-	// =====================================================================
-	// MUTABLE STATE
-	// =====================================================================
-	//
-	// All widget mutations must run on the Fyne UI thread. To keep the
-	// boundary explicit, we separate:
-	//   - xxxUI()  : closes over widgets; call only from UI thread
-	//   - xxx()    : safe from any goroutine; wraps xxxUI() in fyne.Do
 
 	var activePrinter *printer.Printer
 	var androidCombinedStatus *widget.Label
@@ -185,25 +192,15 @@ func NewWindow(application fyne.App) fyne.Window {
 	var isPrinting bool
 	var printerSelectUpdating bool
 
-	// Forward-declared UI-only closures.
 	var updateCombinedStatusDisplayUI func()
 	var updateConfiguredStatusUI func()
 	var reloadSavedPrintersUI func(config.Config)
 
-	// Forward-declared goroutine-safe wrappers.
 	var reloadSavedPrinters func()
 	var updateConfiguredStatus func()
 	var applySavedPrinter func(config.SavedPrinter) error
 	var deleteSavedPrinter func(string, func())
 	var openConfigureDialog func(*platform.Device, *config.SavedPrinter, func())
-
-	// =====================================================================
-	// WIDGET CONSTRUCTION
-	// =====================================================================
-	//
-	// In Fyne, constructing widgets is safe from any goroutine. Mutating
-	// them afterwards (SetText, SetSelected, Refresh, Options=, Enable,
-	// Disable, Show, Hide, SetContent) requires the UI thread.
 
 	selectedLabel := widget.NewLabel("Selected: none")
 
@@ -330,13 +327,6 @@ func NewWindow(application fyne.App) fyne.Window {
 
 	var printButton *widget.Button
 
-	// =====================================================================
-	// UI-THREAD-ONLY CLOSURES
-	// =====================================================================
-	//
-	// These may mutate widgets directly. Callers must either already be on
-	// the Fyne UI thread (Fyne callbacks) or wrap the call in fyne.Do.
-
 	updateCombinedStatusDisplayUI = func() {
 		if androidCombinedStatus == nil {
 			return
@@ -408,10 +398,6 @@ func NewWindow(application fyne.App) fyne.Window {
 		printerSelectUpdating = false
 	}
 
-	// =====================================================================
-	// GOROUTINE-SAFE WRAPPERS
-	// =====================================================================
-
 	reloadSavedPrinters = func() {
 		loaded, err := config.Load(configPath)
 		if err != nil {
@@ -442,7 +428,7 @@ func NewWindow(application fyne.App) fyne.Window {
 		fyne.Do(func() {
 			p := spCopy.Printer
 			activePrinter = &p
-			bridgeState.SetActivePrinter(&p)
+			bridgeState.SetActivePrinterWithPaper(&p, spCopy.PaperWidthMm, spCopy.PaperHeightMm)
 			if spCopy.PaperWidthMm > 0 && spCopy.PaperHeightMm > 0 {
 				ed.SetPaperSize(
 					document.Unit(spCopy.PaperWidthMm)*1000,
@@ -686,12 +672,6 @@ func NewWindow(application fyne.App) fyne.Window {
 		configWindow.Show()
 	}
 
-	// =====================================================================
-	// WIDGET EVENT HANDLERS
-	// =====================================================================
-	//
-	// Fyne invokes these on the UI thread.
-
 	printerSelect.OnChanged = func(selected string) {
 		if printerSelectUpdating {
 			return
@@ -718,7 +698,7 @@ func NewWindow(application fyne.App) fyne.Window {
 			}
 			p := sp.Printer
 			activePrinter = &p
-			bridgeState.SetActivePrinter(&p)
+			bridgeState.SetActivePrinterWithPaper(&p, sp.PaperWidthMm, sp.PaperHeightMm)
 			if sp.PaperWidthMm > 0 && sp.PaperHeightMm > 0 {
 				ed.SetPaperSize(
 					document.Unit(sp.PaperWidthMm)*1000,
@@ -839,15 +819,8 @@ func NewWindow(application fyne.App) fyne.Window {
 
 	printerLabel := widget.NewLabelWithStyle("Printer:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
-	// androidCombinedStatus is a widget; assignment of fields (Wrapping)
-	// happens here on the constructor goroutine, but Fyne only reads them
-	// on render. The first render happens after SetContent on the UI thread.
 	androidCombinedStatus = widget.NewLabel("")
 	androidCombinedStatus.Wrapping = fyne.TextWrapWord
-
-	// =====================================================================
-	// INITIAL UI STATE — on the Fyne UI thread
-	// =====================================================================
 
 	startupCfgCopy := startupCfg
 	fyne.Do(func() {
@@ -861,10 +834,6 @@ func NewWindow(application fyne.App) fyne.Window {
 		updateConfiguredStatusUI()
 		updateCombinedStatusDisplayUI()
 	})
-
-	// =====================================================================
-	// SCREEN LAYOUTS
-	// =====================================================================
 
 	var editorContent *fyne.Container
 	var homeContent fyne.CanvasObject
@@ -942,10 +911,6 @@ func NewWindow(application fyne.App) fyne.Window {
 
 		editorContent = container.NewBorder(nil, footer, nil, nil, content)
 	}
-
-	// ---------------------------------------------------------------------
-	// Scan Printer screen
-	// ---------------------------------------------------------------------
 
 	buildScanPrinterScreen := func() fyne.CanvasObject {
 		statusLabel := widget.NewLabel("Tap Scan to discover printers")
@@ -1154,10 +1119,6 @@ func NewWindow(application fyne.App) fyne.Window {
 		return container.NewBorder(header, nil, nil, nil, container.NewVScroll(body))
 	}
 
-	// ---------------------------------------------------------------------
-	// Settings screen
-	// ---------------------------------------------------------------------
-
 	buildSettingsScreen := func() fyne.CanvasObject {
 		loadedSettings, loadErr := config.Load(configPath)
 		if loadErr != nil {
@@ -1256,7 +1217,7 @@ func NewWindow(application fyne.App) fyne.Window {
 			}
 			p := ap.Printer
 			activePrinter = &p
-			bridgeState.SetActivePrinter(&p)
+			bridgeState.SetActivePrinterWithPaper(&p, ap.PaperWidthMm, ap.PaperHeightMm)
 			ed.SetPaperSize(document.Unit(pw)*1000, document.Unit(ph)*1000)
 			paperWidth.SetText(strconv.Itoa(pw))
 			paperHeight.SetText(strconv.Itoa(ph))
@@ -1295,10 +1256,6 @@ func NewWindow(application fyne.App) fyne.Window {
 
 		return container.NewBorder(header, nil, nil, nil, container.NewVScroll(body))
 	}
-
-	// ---------------------------------------------------------------------
-	// Add File screen
-	// ---------------------------------------------------------------------
 
 	buildAddFileScreen := func() fyne.CanvasObject {
 		statusLabel := widget.NewLabel("No file selected")
@@ -1423,10 +1380,6 @@ func NewWindow(application fyne.App) fyne.Window {
 
 		return container.NewBorder(header, nil, nil, nil, body)
 	}
-
-	// ---------------------------------------------------------------------
-	// Home screen
-	// ---------------------------------------------------------------------
 
 	buildHomeScreen := func() fyne.CanvasObject {
 		title := canvas.NewText("PrintCat", color.Black)

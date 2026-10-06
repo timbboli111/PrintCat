@@ -30,12 +30,20 @@ type SubmitRequest struct {
 
 // State holds the shared PrintCat engine used by both the Fyne UI and the
 // external print-job path. It is safe for concurrent use.
+//
+// Besides the active printer, State also tracks the user's chosen paper
+// dimensions for that printer (in millimetres). These are separate from
+// printer.Printer.Profile.MediaWidth, which describes the printer's
+// physical printable width. Android Print Framework needs the user-chosen
+// dimensions to advertise the correct MediaSize.
 type State struct {
 	service  *printer.Service
 	renderer render.Renderer
 
-	mu            sync.RWMutex
-	activePrinter *printer.Printer
+	mu                  sync.RWMutex
+	activePrinter       *printer.Printer
+	activePaperWidthMm  int
+	activePaperHeightMm int
 }
 
 // NewState creates a State around the already-initialized printer service
@@ -45,12 +53,21 @@ func NewState(service *printer.Service, renderer render.Renderer) *State {
 	return &State{service: service, renderer: renderer}
 }
 
-// SetActivePrinter records the printer that external jobs will be sent to.
-// Pass nil to clear.
+// SetActivePrinter records the printer that external jobs will be sent to,
+// clearing the associated paper dimensions. Pass nil to clear.
 func (s *State) SetActivePrinter(p *printer.Printer) {
+	s.SetActivePrinterWithPaper(p, 0, 0)
+}
+
+// SetActivePrinterWithPaper records the printer that external jobs will be
+// sent to together with the user's chosen paper dimensions in millimetres.
+// Pass nil for p to clear the active printer and the paper dimensions.
+func (s *State) SetActivePrinterWithPaper(p *printer.Printer, widthMm, heightMm int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.activePrinter = p
+	s.activePaperWidthMm = widthMm
+	s.activePaperHeightMm = heightMm
 }
 
 // ActivePrinter returns the currently configured printer, or nil if none.
@@ -58,6 +75,22 @@ func (s *State) ActivePrinter() *printer.Printer {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.activePrinter
+}
+
+// ActivePaperWidthMm returns the user-chosen paper width in millimetres for
+// the active printer, or 0 if none is configured.
+func (s *State) ActivePaperWidthMm() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activePaperWidthMm
+}
+
+// ActivePaperHeightMm returns the user-chosen paper height in millimetres for
+// the active printer, or 0 if none is configured.
+func (s *State) ActivePaperHeightMm() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activePaperHeightMm
 }
 
 // Submit processes one external print job. Each page in req.Pages is

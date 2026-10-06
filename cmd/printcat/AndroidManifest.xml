@@ -8,19 +8,31 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Bluetooth Legacy (Android <= 11) -->
+    <!-- Bluetooth Legacy (Android <= 11 / API <= 30) -->
     <uses-permission android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
 
-    <!-- Bluetooth Modern (Android 12+) -->
+    <!-- Bluetooth Modern (Android 12+ / API 31+) -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-    <!-- Location (Android 10-11) -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="30" />
+    <!-- Location permissions required for Classic Bluetooth discovery.
+         - API 24-30: ACCESS_FINE_LOCATION is required by the framework
+           (dangerous, runtime grant).
+         - API 31+:   AOSP does not require it when BLUETOOTH_SCAN is
+           granted, but some OEM ROMs (notably MIUI / Redmi) still enforce
+           ACCESS_FINE_LOCATION before startDiscovery() succeeds.
+         - Both are declared without maxSdkVersion so they remain available
+           on all API levels. On Android 12+, requesting FINE also requires
+           requesting COARSE in the same requestPermissions() call so the
+           platform can present the "Precise vs Approximate" dialog.
+         - Do NOT add android:usesPermissionFlags="neverForLocation" to
+           BLUETOOTH_SCAN: it would strip the location path that MIUI
+           depends on. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <uses-feature android:name="android.hardware.bluetooth"
         android:required="false" />
@@ -32,7 +44,7 @@
         <activity
             android:name="org.golang.app.GoNativeActivity"
             android:label="PrintCat"
-            android:configChanges="orientation|screenLayout">
+            android:configChanges="keyboardHidden|orientation">
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="main" />

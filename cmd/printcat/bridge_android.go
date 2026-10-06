@@ -79,9 +79,52 @@ func Java_com_printcat_app_PrintCatPrintService_nativeEnsureBridgeInitialized(
 		log.Printf("[PrintCatBridge][go] nativeEnsureBridgeInitialized: no active printer configured")
 		return C.jint(-2)
 	}
-	log.Printf("[PrintCatBridge][go] nativeEnsureBridgeInitialized: active printer=%q protocol=%s transport=%s",
-		active.Name, active.Connection.Protocol, active.Connection.Transport)
+	log.Printf("[PrintCatBridge][go] nativeEnsureBridgeInitialized: active printer=%q protocol=%s transport=%s paper=%dx%dmm",
+		active.Name, active.Connection.Protocol, active.Connection.Transport,
+		state.ActivePaperWidthMm(), state.ActivePaperHeightMm())
 	return C.jint(0)
+}
+
+// nativeGetActivePaperWidthMils returns the user-chosen paper width of the
+// active printer in mils (1 mm = 5000/127 mils), or -1 if no paper size is
+// configured. Used by PrintCatPrintService to advertise the correct
+// MediaSize to the Android Print Framework.
+//
+//export Java_com_printcat_app_PrintCatPrintService_nativeGetActivePaperWidthMils
+func Java_com_printcat_app_PrintCatPrintService_nativeGetActivePaperWidthMils(
+	env *C.JNIEnv,
+	clazz C.jclass,
+) C.jint {
+	state := bridge.GetGlobal()
+	if state == nil {
+		return C.jint(-1)
+	}
+	mm := state.ActivePaperWidthMm()
+	if mm <= 0 {
+		return C.jint(-1)
+	}
+	mils := mm * 5000 / 127
+	return C.jint(mils)
+}
+
+// nativeGetActivePaperHeightMils is the height counterpart of
+// nativeGetActivePaperWidthMils.
+//
+//export Java_com_printcat_app_PrintCatPrintService_nativeGetActivePaperHeightMils
+func Java_com_printcat_app_PrintCatPrintService_nativeGetActivePaperHeightMils(
+	env *C.JNIEnv,
+	clazz C.jclass,
+) C.jint {
+	state := bridge.GetGlobal()
+	if state == nil {
+		return C.jint(-1)
+	}
+	mm := state.ActivePaperHeightMm()
+	if mm <= 0 {
+		return C.jint(-1)
+	}
+	mils := mm * 5000 / 127
+	return C.jint(mils)
 }
 
 // Step 1B entry point. Extracts page PNGs, page dimensions in micrometers,

@@ -21,3 +21,11 @@ func CheckBluetoothScanPermission(ctx context.Context) (bool, error) {
 func EnsureBluetoothScanPermission(ctx context.Context) (bool, error) {
 	return ensureBluetoothScanPermission(ctx)
 }
+
+func CheckFineLocationPermission(ctx context.Context) (bool, error) {
+	return checkFineLocationPermission(ctx)
+}
+
+func EnsureFineLocationPermission(ctx context.Context) (bool, error) {
+	return ensureFineLocationPermission(ctx)
+}

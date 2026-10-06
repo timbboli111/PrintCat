@@ -23,3 +23,15 @@ func checkBluetoothScanPermission(ctx context.Context) (bool, error) {
 func ensureBluetoothScanPermission(ctx context.Context) (bool, error) {
 	return false, nil
 }
+
+func checkFineLocationPermission(ctx context.Context) (bool, error) {
+	return false, nil
+}
+
+func ensureFineLocationPermission(ctx context.Context) (bool, error) {
+	// Non-Android platforms do not require location permission for
+	// Bluetooth discovery. The caller in fyneapp.discoverBluetoothPrinters
+	// early-returns on non-Android anyway, so this value is only a
+	// safeguard.
+	return true, nil
+}

@@ -27,7 +27,9 @@ import java.util.concurrent.Executors;
  * 1C ensures the process-wide bridge state exists and the persisted active
  * printer is loaded so that jobs arriving through the PrintService reach
  * the existing PrintCat engine even when the Fyne UI has not been opened in
- * this process.</p>
+ * this process. This revision also advertises the active printer's
+ * user-chosen paper dimensions to the Android Print Framework, replacing
+ * the previous hard-coded 80x200 mm default.</p>
  *
  * <p><strong>Threading boundary.</strong> Every {@code
  * android.printservice.PrintJob} method (getId, getInfo, getDocument,
@@ -57,6 +59,10 @@ public final class PrintCatPrintService extends PrintService {
     /** Fallback DPI used only when PrintAttributes does not carry one. */
     private static final int FALLBACK_DPI = 203;
 
+    /** Fallback paper size (mm) when the bridge has no active paper size. */
+    private static final int FALLBACK_PAPER_WIDTH_MM = 80;
+    private static final int FALLBACK_PAPER_HEIGHT_MM = 200;
+
     /**
      * Canonical config path relative to the Android app files directory.
      * Fyne on Android maps {@code application.Storage().RootURI()} to
@@ -76,6 +82,12 @@ public final class PrintCatPrintService extends PrintService {
     //  -1 = bootstrap failure
     //  -2 = no active printer configured
     private static native int nativeEnsureBridgeInitialized(String configPath);
+
+    // Step 1C paper propagation: returns the active printer's user-chosen
+    // paper width or height in mils (1 mm = 5000/127 mils), or -1 if not
+    // configured.
+    private static native int nativeGetActivePaperWidthMils();
+    private static native int nativeGetActivePaperHeightMils();
 
     // Step 1B submit entry point. See cmd/printcat/bridge_android.go for the
     // full return-code table.
@@ -398,6 +410,36 @@ public final class PrintCatPrintService extends PrintService {
         }
     }
 
+    /**
+     * Reads the active printer's user-chosen paper dimensions from the Go
+     * bridge, falling back to the historical 80x200 mm default when none is
+     * configured. Returns mils, matching the units used by
+     * {@link MediaSize}.
+     */
+    private int[] readActivePaperMils() {
+        int widthMils = -1;
+        int heightMils = -1;
+        try {
+            widthMils = nativeGetActivePaperWidthMils();
+            heightMils = nativeGetActivePaperHeightMils();
+        } catch (UnsatisfiedLinkError e) {
+            Log.w(TAG, "nativeGetActivePaper*Mils: library not loaded: "
+                    + e.getMessage());
+        } catch (Throwable t) {
+            Log.w(TAG, "nativeGetActivePaper*Mils failed", t);
+        }
+        if (widthMils <= 0 || heightMils <= 0) {
+            widthMils = mmToMils(FALLBACK_PAPER_WIDTH_MM);
+            heightMils = mmToMils(FALLBACK_PAPER_HEIGHT_MM);
+        }
+        return new int[]{widthMils, heightMils};
+    }
+
+    private static int mmToMils(int mm) {
+        // 1 mm = 1000/25.4 mils = 5000/127 mils.
+        return mm * 5000 / 127;
+    }
+
     private static final class PrintCompletion {
         private final PrintJob printJob;
         private final Handler mainHandler;
@@ -440,15 +482,32 @@ public final class PrintCatPrintService extends PrintService {
     }
 
     // ---------------------------------------------------------------------
-    // Discovery session (unchanged from Step 0)
+    // Discovery session
     // ---------------------------------------------------------------------
 
+    /**
+     * Advertises the single active PrintCat printer to the Android Print
+     * Framework. The MediaSize is read from the Go bridge on each discovery
+     * cycle, so changes to the active printer's paper dimensions propagate
+     * to the framework's print dialog.
+     */
     private final class ProbePrinterDiscoverySession extends PrinterDiscoverySession {
 
         @Override
         public void onStartPrinterDiscovery(List<PrinterId> priorityList) {
             try {
                 PrinterId pid = PrintCatPrintService.this.generatePrinterId("printcat-probe");
+
+                int[] paperMils = readActivePaperMils();
+                int widthMils = paperMils[0];
+                int heightMils = paperMils[1];
+                // Convert back to mm for the human-readable label; mils may
+                // be an approximation of the user-chosen mm value.
+                int widthMm = (int) Math.round(widthMils * 25.4 / 1000.0);
+                int heightMm = (int) Math.round(heightMils * 25.4 / 1000.0);
+
+                String sizeId = "receipt-" + widthMm + "x" + heightMm;
+                String sizeLabel = widthMm + "mm x " + heightMm + "mm";
 
                 PrinterCapabilitiesInfo.Builder caps =
                         new PrinterCapabilitiesInfo.Builder(pid);
@@ -463,7 +522,7 @@ public final class PrintCatPrintService extends PrintService {
                         new PrintAttributes.Resolution("203", "203dpi", 203, 203),
                         true);
                 caps.addMediaSize(
-                        new MediaSize("receipt-80x200", "80mm x 200mm", 3150, 7874),
+                        new MediaSize(sizeId, sizeLabel, widthMils, heightMils),
                         true);
 
                 PrinterInfo info = new PrinterInfo.Builder(
@@ -472,7 +531,8 @@ public final class PrintCatPrintService extends PrintService {
                         .build();
 
                 addPrinters(Collections.singletonList(info));
-                Log.d(TAG, "ProbePrinterDiscoverySession advertised printcat-probe");
+                Log.d(TAG, "ProbePrinterDiscoverySession advertised printcat-probe size="
+                        + sizeLabel + " (" + widthMils + "x" + heightMils + " mils)");
             } catch (Throwable t) {
                 Log.e(TAG, "onStartPrinterDiscovery failed", t);
             }
