@@ -17,18 +17,15 @@ import (
 #include <stdlib.h>
 #include <string.h>
 
-// Struct to hold device info
 typedef struct {
     char* address;
     char* name;
 } DeviceInfo;
 
-// Helper to get exception message
 static char* get_exception_message(JNIEnv* env) {
     jthrowable exc = (*env)->ExceptionOccurred(env);
     if (exc == NULL) return NULL;
     (*env)->ExceptionClear(env);
-
     jclass excClass = (*env)->GetObjectClass(env, exc);
     jmethodID getMessage = (*env)->GetMethodID(env, excClass, "getMessage", "()Ljava/lang/String;");
     if (getMessage == NULL) {
@@ -50,7 +47,6 @@ static char* get_exception_message(JNIEnv* env) {
     return result;
 }
 
-// Free DeviceInfo array
 static void free_device_infos(DeviceInfo* infos, int count) {
     if (infos == NULL) return;
     for (int i = 0; i < count; i++) {
@@ -60,12 +56,10 @@ static void free_device_infos(DeviceInfo* infos, int count) {
     free(infos);
 }
 
-// Main discovery function: load helper, call startDiscovery, parse DeviceInfo
 static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeoutMs, int* count, char** error_msg) {
     if (error_msg) *error_msg = NULL;
     *count = 0;
 
-    // 1. Get Context class
     jclass contextClass = (*env)->GetObjectClass(env, context);
     if (contextClass == NULL) {
         char* msg = get_exception_message(env);
@@ -73,7 +67,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 2. Get getClassLoader method
     jmethodID getClassLoader = (*env)->GetMethodID(env, contextClass, "getClassLoader", "()Ljava/lang/ClassLoader;");
     if (getClassLoader == NULL) {
         char* msg = get_exception_message(env);
@@ -82,7 +75,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 3. Get class loader instance
     jobject classLoader = (*env)->CallObjectMethod(env, context, getClassLoader);
     (*env)->DeleteLocalRef(env, contextClass);
     if (classLoader == NULL) {
@@ -91,7 +83,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 4. Get ClassLoader class
     jclass loaderClass = (*env)->FindClass(env, "java/lang/ClassLoader");
     if (loaderClass == NULL) {
         char* msg = get_exception_message(env);
@@ -100,7 +91,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 5. Get loadClass method
     jmethodID loadClass = (*env)->GetMethodID(env, loaderClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
     if (loadClass == NULL) {
         char* msg = get_exception_message(env);
@@ -110,7 +100,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 6. Load BluetoothDiscoveryHelper class
     jstring className = (*env)->NewStringUTF(env, "org.golang.app.BluetoothDiscoveryHelper");
     if (className == NULL) {
         char* msg = get_exception_message(env);
@@ -130,7 +119,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 7. Get startDiscovery method
     jmethodID startDiscovery = (*env)->GetStaticMethodID(env, helperClass, "startDiscovery",
         "(Landroid/content/Context;J)[Lorg/golang/app/BluetoothDiscoveryHelper$DeviceInfo;");
     if (startDiscovery == NULL) {
@@ -140,7 +128,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 8. Call startDiscovery with cast to jlong
     jobjectArray resultArray = (*env)->CallStaticObjectMethod(env, helperClass, startDiscovery, context, (jlong)timeoutMs);
     if ((*env)->ExceptionCheck(env)) {
         char* msg = get_exception_message(env);
@@ -155,7 +142,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 9. Get array length
     jsize len = (*env)->GetArrayLength(env, resultArray);
     if (len == 0) {
         (*env)->DeleteLocalRef(env, resultArray);
@@ -164,7 +150,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 10. Get DeviceInfo class from first element (instead of FindClass)
     jobject firstElement = (*env)->GetObjectArrayElement(env, resultArray, 0);
     if (firstElement == NULL) {
         char* msg = get_exception_message(env);
@@ -183,7 +168,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 11. Get field IDs
     jfieldID addressField = (*env)->GetFieldID(env, deviceInfoClass, "address", "Ljava/lang/String;");
     jfieldID nameField = (*env)->GetFieldID(env, deviceInfoClass, "name", "Ljava/lang/String;");
     if (addressField == NULL || nameField == NULL) {
@@ -195,7 +179,6 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
         return NULL;
     }
 
-    // 12. Allocate DeviceInfo array
     DeviceInfo* infos = (DeviceInfo*)malloc(sizeof(DeviceInfo) * len);
     if (infos == NULL) {
         char* msg = get_exception_message(env);
@@ -256,6 +239,134 @@ static DeviceInfo* bluetooth_discovery(JNIEnv* env, jobject context, long timeou
 
     return infos;
 }
+
+// USB discovery: returns an array of USB device ids as int (device_id).
+// The Go side converts each id to a string endpoint. We do not need to
+// carry a name here because UsbPrinterHelper.listPrinters already filters
+// to printable devices; the display name is fetched separately in the Go
+// layer via productName() -- but to keep the JNI surface minimal we just
+// return ids and a synthesized "USB printer <id>" name.
+typedef struct {
+    int device_id;
+    char* name;
+} UsbDeviceInfo;
+
+static void free_usb_device_infos(UsbDeviceInfo* infos, int count) {
+    if (infos == NULL) return;
+    for (int i = 0; i < count; i++) {
+        if (infos[i].name) free(infos[i].name);
+    }
+    free(infos);
+}
+
+static UsbDeviceInfo* usb_discovery(JNIEnv* env, jobject context, int* count, char** error_msg) {
+    if (error_msg) *error_msg = NULL;
+    *count = 0;
+
+    jclass helperClass = (*env)->FindClass(env, "com/printcat/app/UsbPrinterHelper");
+    if (helperClass == NULL) {
+        char* msg = get_exception_message(env);
+        if (msg) { *error_msg = msg; } else { *error_msg = strdup("UsbPrinterHelper class not found"); }
+        return NULL;
+    }
+
+    jmethodID listPrinters = (*env)->GetStaticMethodID(env, helperClass, "listPrinters",
+        "(Landroid/content/Context;)[Lcom/printcat/app/UsbPrinterHelper$DeviceInfo;");
+    if (listPrinters == NULL) {
+        char* msg = get_exception_message(env);
+        if (msg) { *error_msg = msg; } else { *error_msg = strdup("UsbPrinterHelper.listPrinters not found"); }
+        (*env)->DeleteLocalRef(env, helperClass);
+        return NULL;
+    }
+
+    jobjectArray resultArray = (*env)->CallStaticObjectMethod(env, helperClass, listPrinters, context);
+    if ((*env)->ExceptionCheck(env)) {
+        char* msg = get_exception_message(env);
+        if (msg) { *error_msg = msg; } else { *error_msg = strdup("Java exception in listPrinters"); }
+        (*env)->DeleteLocalRef(env, helperClass);
+        return NULL;
+    }
+    if (resultArray == NULL) {
+        (*env)->DeleteLocalRef(env, helperClass);
+        return NULL;
+    }
+
+    jsize len = (*env)->GetArrayLength(env, resultArray);
+    if (len == 0) {
+        (*env)->DeleteLocalRef(env, resultArray);
+        (*env)->DeleteLocalRef(env, helperClass);
+        return NULL;
+    }
+
+    jobject firstElement = (*env)->GetObjectArrayElement(env, resultArray, 0);
+    if (firstElement == NULL) {
+        (*env)->DeleteLocalRef(env, resultArray);
+        (*env)->DeleteLocalRef(env, helperClass);
+        return NULL;
+    }
+    jclass infoClass = (*env)->GetObjectClass(env, firstElement);
+    (*env)->DeleteLocalRef(env, firstElement);
+    if (infoClass == NULL) {
+        (*env)->DeleteLocalRef(env, resultArray);
+        (*env)->DeleteLocalRef(env, helperClass);
+        return NULL;
+    }
+
+    jfieldID idField = (*env)->GetFieldID(env, infoClass, "deviceId", "I");
+    jfieldID nameField = (*env)->GetFieldID(env, infoClass, "name", "Ljava/lang/String;");
+    if (idField == NULL || nameField == NULL) {
+        char* msg = get_exception_message(env);
+        if (msg) { *error_msg = msg; } else { *error_msg = strdup("UsbPrinterHelper.DeviceInfo fields not found"); }
+        (*env)->DeleteLocalRef(env, infoClass);
+        (*env)->DeleteLocalRef(env, resultArray);
+        (*env)->DeleteLocalRef(env, helperClass);
+        return NULL;
+    }
+
+    UsbDeviceInfo* infos = (UsbDeviceInfo*)malloc(sizeof(UsbDeviceInfo) * len);
+    if (infos == NULL) {
+        (*env)->DeleteLocalRef(env, infoClass);
+        (*env)->DeleteLocalRef(env, resultArray);
+        (*env)->DeleteLocalRef(env, helperClass);
+        return NULL;
+    }
+    memset(infos, 0, sizeof(UsbDeviceInfo) * len);
+
+    int idx = 0;
+    for (jsize i = 0; i < len; i++) {
+        jobject info = (*env)->GetObjectArrayElement(env, resultArray, i);
+        if (info == NULL) continue;
+
+        jint devId = (*env)->GetIntField(env, info, idField);
+        jstring jName = (*env)->GetObjectField(env, info, nameField);
+        const char* nameStr = NULL;
+        if (jName != NULL) {
+            nameStr = (*env)->GetStringUTFChars(env, jName, NULL);
+        }
+        infos[idx].device_id = (int)devId;
+        if (nameStr != NULL && strlen(nameStr) > 0) {
+            infos[idx].name = strdup(nameStr);
+        } else {
+            infos[idx].name = strdup("USB printer");
+        }
+        idx++;
+
+        if (nameStr != NULL) {
+            (*env)->ReleaseStringUTFChars(env, jName, nameStr);
+        }
+        if (jName != NULL) {
+            (*env)->DeleteLocalRef(env, jName);
+        }
+        (*env)->DeleteLocalRef(env, info);
+    }
+
+    *count = idx;
+    (*env)->DeleteLocalRef(env, infoClass);
+    (*env)->DeleteLocalRef(env, resultArray);
+    (*env)->DeleteLocalRef(env, helperClass);
+
+    return infos;
+}
 */
 import "C"
 
@@ -264,10 +375,17 @@ const discoveryTimeout = 15 * time.Second
 type discoveryAndroid struct{}
 
 func (d *discoveryAndroid) Discover(ctx context.Context, kind printer.TransportKind) ([]Device, error) {
-	if kind != printer.BluetoothClassic && kind != "" {
+	switch kind {
+	case printer.USB:
+		return d.discoverUSB(ctx)
+	case printer.BluetoothClassic, "":
+		return d.discoverBluetooth(ctx)
+	default:
 		return []Device{}, nil
 	}
+}
 
+func (d *discoveryAndroid) discoverBluetooth(ctx context.Context) ([]Device, error) {
 	var devices []Device
 	var err error
 	done := make(chan struct{})
@@ -293,7 +411,6 @@ func (d *discoveryAndroid) Discover(ctx context.Context, kind printer.TransportK
 			}
 			defer C.free_device_infos(infos, count)
 
-			// Convert C array to Go slice
 			cInfos := unsafe.Slice(infos, count)
 			for _, info := range cInfos {
 				if info.address == nil || C.strlen(info.address) == 0 {
@@ -312,6 +429,61 @@ func (d *discoveryAndroid) Discover(ctx context.Context, kind printer.TransportK
 					Profile: printer.PrinterProfile{
 						SupportedProtocols:  []printer.Protocol{},
 						SupportedTransports: []printer.TransportKind{printer.BluetoothClassic},
+					},
+				})
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-done:
+		return devices, err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (d *discoveryAndroid) discoverUSB(ctx context.Context) ([]Device, error) {
+	var devices []Device
+	var err error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		err = driver.RunNative(func(raw interface{}) error {
+			ac, ok := raw.(*driver.AndroidContext)
+			if !ok {
+				return fmt.Errorf("failed to get Android context")
+			}
+			env := (*C.JNIEnv)(unsafe.Pointer(ac.Env))
+			ctxObj := (C.jobject)(unsafe.Pointer(ac.Ctx))
+
+			var count C.int
+			var errMsg *C.char
+			infos := C.usb_discovery(env, ctxObj, &count, &errMsg)
+			if errMsg != nil {
+				defer C.free(unsafe.Pointer(errMsg))
+				return fmt.Errorf("JNI error: %s", C.GoString(errMsg))
+			}
+			if infos == nil || count == 0 {
+				return nil
+			}
+			defer C.free_usb_device_infos(infos, count)
+
+			cInfos := unsafe.Slice(infos, count)
+			for _, info := range cInfos {
+				idStr := fmt.Sprintf("%d", int(info.device_id))
+				name := C.GoString(info.name)
+				if name == "" {
+					name = "USB printer"
+				}
+				devices = append(devices, Device{
+					ID:       idStr,
+					Name:     name,
+					Kind:     printer.USB,
+					Endpoint: idStr,
+					Profile: printer.PrinterProfile{
+						SupportedProtocols:  []printer.Protocol{},
+						SupportedTransports: []printer.TransportKind{printer.USB},
 					},
 				})
 			}

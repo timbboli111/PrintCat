@@ -11,6 +11,14 @@ import (
 type discoveryWindows struct{}
 
 func (d *discoveryWindows) Discover(ctx context.Context, kind printer.TransportKind) ([]Device, error) {
+	// Only Serial discovery is implemented on Windows. Other transport
+	// kinds (Bluetooth Classic, BLE, USB, AndroidPrint) are not discovered
+	// by this integration and must be filtered out here so callers do not
+	// accidentally receive COM ports for non-Serial kinds.
+	if kind != printer.Serial && kind != "" {
+		return []Device{}, nil
+	}
+
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `HARDWARE\DEVICEMAP\SERIALCOMM`, registry.QUERY_VALUE)
 	if err != nil {
 		if err == registry.ErrNotExist {
@@ -36,7 +44,6 @@ func (d *discoveryWindows) Discover(ctx context.Context, kind printer.TransportK
 		if value == "" {
 			continue
 		}
-		// Windows COM port naming: COMx (case insensitive)
 		if len(value) < 4 || value[:3] != "COM" {
 			continue
 		}

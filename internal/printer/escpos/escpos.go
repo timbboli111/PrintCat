@@ -10,6 +10,14 @@ import (
 	"github.com/timboli111/PrintCat/internal/render"
 )
 
+// defaultBinarizeThreshold is used when PrinterProfile.Density is not set
+// (<= 0). 160 corresponds to ~37% coverage: it catches anti-aliased edges
+// from PdfRenderer (a 1-pixel stroke at 203 DPI spread over 2 pixels at
+// ~50% coverage each is gray ~128, and 160 catches it) while still
+// discarding near-white anti-noise. Background is pure white, so the
+// higher threshold does not introduce speckle.
+const defaultBinarizeThreshold = 160
+
 type Encoder struct{}
 
 func (e *Encoder) Protocol() printer.Protocol {
@@ -24,6 +32,14 @@ func (e *Encoder) Encode(ctx context.Context, doc document.Document, renderer re
 		return nil, fmt.Errorf("invalid DPI: %d", profile.DPI)
 	}
 
+	// Raster binarization threshold. Configurable per printer via
+	// PrinterProfile.Density; falls back to defaultBinarizeThreshold when
+	// unset or invalid.
+	threshold := profile.Density
+	if threshold <= 0 {
+		threshold = defaultBinarizeThreshold
+	}
+
 	docWidthDots := int(float64(doc.PageSize.Width) / 1000.0 / 25.4 * float64(profile.DPI))
 	docHeightDots := int(float64(doc.PageSize.Height) / 1000.0 / 25.4 * float64(profile.DPI))
 
@@ -31,10 +47,18 @@ func (e *Encoder) Encode(ctx context.Context, doc document.Document, renderer re
 		return nil, fmt.Errorf("document dimensions too small: %dx%d dots", docWidthDots, docHeightDots)
 	}
 
+	// Print head width in dots. When PrinterProfile.MediaWidth is set, the
+	// raster is cropped to the leftmost mediaWidthDots before packing. When
+	// MediaWidth is 0 the encoder behaves exactly as before: the whole
+	// raster at the physical paper width is packed.
+	mediaWidthDots := 0
 	if profile.MediaWidth > 0 {
-		mediaWidthDots := int(float64(profile.MediaWidth) / 1000.0 / 25.4 * float64(profile.DPI))
-		if docWidthDots > mediaWidthDots {
-			return nil, fmt.Errorf("document width (%d dots) exceeds media width (%d dots)", docWidthDots, mediaWidthDots)
+		mediaWidthDots = int(float64(profile.MediaWidth) / 1000.0 / 25.4 * float64(profile.DPI))
+		if mediaWidthDots <= 0 {
+			return nil, fmt.Errorf("invalid media width: %d um -> %d dots", profile.MediaWidth, mediaWidthDots)
+		}
+		if mediaWidthDots > docWidthDots {
+			mediaWidthDots = docWidthDots
 		}
 	}
 
@@ -54,13 +78,18 @@ func (e *Encoder) Encode(ctx context.Context, doc document.Document, renderer re
 		return nil, fmt.Errorf("raster pixel length mismatch: expected %d, got %d", raster.Width*raster.Height, len(raster.Pixels))
 	}
 
-	widthBytes := (docWidthDots + 7) / 8
+	outWidthDots := docWidthDots
+	if mediaWidthDots > 0 && mediaWidthDots < docWidthDots {
+		outWidthDots = mediaWidthDots
+	}
+
+	widthBytes := (outWidthDots + 7) / 8
 	packed := make([]byte, widthBytes*docHeightDots)
 	for y := 0; y < docHeightDots; y++ {
-		for x := 0; x < docWidthDots; x++ {
-			idx := y*docWidthDots + x
+		for x := 0; x < outWidthDots; x++ {
+			srcIdx := y*docWidthDots + x
 			bit := 0
-			if raster.Pixels[idx] < 128 {
+			if int(raster.Pixels[srcIdx]) < threshold {
 				bit = 1
 			}
 			byteIdx := y*widthBytes + x/8

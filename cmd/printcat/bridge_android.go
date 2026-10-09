@@ -23,13 +23,6 @@ import (
 	"github.com/timboli111/PrintCat/internal/bridge"
 )
 
-// Step 0 probe: proves that a Java -> Go JNI call reaches the Go runtime
-// while PrintService is being invoked by the Android Print Framework.
-//
-// The cgo preamble contains only #include and function declarations, which
-// is required when //export is used. Diagnostic content is written via
-// log.Printf, which gomobile routes to Android logcat.
-//
 //export Java_com_printcat_app_PrintCatPrintService_nativeProbe
 func Java_com_printcat_app_PrintCatPrintService_nativeProbe(env *C.JNIEnv, clazz C.jclass, marker C.jint) C.jint {
 	log.Printf("[PrintCatProbe][go] nativeProbe reached: marker=%d runtime=%s/%s goroutines=%d",
@@ -37,17 +30,6 @@ func Java_com_printcat_app_PrintCatPrintService_nativeProbe(env *C.JNIEnv, clazz
 	return C.jint(42)
 }
 
-// Step 1C bootstrap: ensures the process-wide bridge state exists and the
-// active printer has been loaded from the persisted config. Called by
-// PrintCatPrintService.onCreate so the JNI submit path works even when the
-// Fyne UI has never run in this process.
-//
-// Return codes:
-//
-//	 0  state present and active printer configured
-//	-1  bootstrap failed (printer engine could not be constructed)
-//	-2  state present but no active printer (config absent or empty)
-//
 //export Java_com_printcat_app_PrintCatPrintService_nativeEnsureBridgeInitialized
 func Java_com_printcat_app_PrintCatPrintService_nativeEnsureBridgeInitialized(
 	env *C.JNIEnv,
@@ -79,17 +61,13 @@ func Java_com_printcat_app_PrintCatPrintService_nativeEnsureBridgeInitialized(
 		log.Printf("[PrintCatBridge][go] nativeEnsureBridgeInitialized: no active printer configured")
 		return C.jint(-2)
 	}
-	log.Printf("[PrintCatBridge][go] nativeEnsureBridgeInitialized: active printer=%q protocol=%s transport=%s paper=%dx%dmm",
+	log.Printf("[PrintCatBridge][go] nativeEnsureBridgeInitialized: active printer=%q protocol=%s transport=%s paper=%dx%dmm printable=%dum",
 		active.Name, active.Connection.Protocol, active.Connection.Transport,
-		state.ActivePaperWidthMm(), state.ActivePaperHeightMm())
+		state.ActivePaperWidthMm(), state.ActivePaperHeightMm(),
+		int64(active.Profile.MediaWidth))
 	return C.jint(0)
 }
 
-// nativeGetActivePaperWidthMils returns the user-chosen paper width of the
-// active printer in mils (1 mm = 5000/127 mils), or -1 if no paper size is
-// configured. Used by PrintCatPrintService to advertise the correct
-// MediaSize to the Android Print Framework.
-//
 //export Java_com_printcat_app_PrintCatPrintService_nativeGetActivePaperWidthMils
 func Java_com_printcat_app_PrintCatPrintService_nativeGetActivePaperWidthMils(
 	env *C.JNIEnv,
@@ -107,9 +85,6 @@ func Java_com_printcat_app_PrintCatPrintService_nativeGetActivePaperWidthMils(
 	return C.jint(mils)
 }
 
-// nativeGetActivePaperHeightMils is the height counterpart of
-// nativeGetActivePaperWidthMils.
-//
 //export Java_com_printcat_app_PrintCatPrintService_nativeGetActivePaperHeightMils
 func Java_com_printcat_app_PrintCatPrintService_nativeGetActivePaperHeightMils(
 	env *C.JNIEnv,
@@ -127,33 +102,35 @@ func Java_com_printcat_app_PrintCatPrintService_nativeGetActivePaperHeightMils(
 	return C.jint(mils)
 }
 
-// Step 1B entry point. Extracts page PNGs, page dimensions in micrometers,
-// DPI, and the local printer id from JNI, builds a bridge.SubmitRequest, and
-// hands it to bridge.State.Submit. The Java caller uses the return code to
-// decide between printJob.complete() and printJob.fail(reason).
+// nativeGetActiveMediaWidthMils returns the active printer's printable
+// width in mils (1 mm = 5000/127 mils), or -1 if the printer profile does
+// not declare one. PrintCatPrintService uses this value to set MinMargins
+// on the advertised PrinterInfo so that Android Print Framework keeps
+// content within the leftmost printable-width portion of the physical
+// page. It does NOT change the MediaSize (which remains the physical paper
+// width).
 //
-// Return codes:
-//
-//	 0  success
-//	-1  bridge state not initialized (SetGlobal not called)
-//	-2  no active printer configured
-//	-3  pagesPng is null
-//	-4  widthsUm or heightsUm is null
-//	-5  pagesPng is empty
-//	-6  array length mismatch
-//	-7  invalid dpi
-//	-8  failed to copy widthsUm
-//	-9  failed to copy heightsUm
-//	-10 page element is null
-//	-11 page byte[] is empty
-//	-12 state.Submit returned an error
-//
-// Note: JNI handle types (C.jobjectArray, C.jintArray, C.jstring) are not
-// directly comparable to nil in Go 1.21+ because cgo imports them as
-// distinct named types. Each null check therefore converts to
-// unsafe.Pointer first, which is comparable and requires no additional C
-// helper.
-//
+//export Java_com_printcat_app_PrintCatPrintService_nativeGetActiveMediaWidthMils
+func Java_com_printcat_app_PrintCatPrintService_nativeGetActiveMediaWidthMils(
+	env *C.JNIEnv,
+	clazz C.jclass,
+) C.jint {
+	state := bridge.GetGlobal()
+	if state == nil {
+		return C.jint(-1)
+	}
+	active := state.ActivePrinter()
+	if active == nil {
+		return C.jint(-1)
+	}
+	um := int64(active.Profile.MediaWidth)
+	if um <= 0 {
+		return C.jint(-1)
+	}
+	mils := um * 5 / 127
+	return C.jint(mils)
+}
+
 //export Java_com_printcat_app_PrintCatPrintService_nativeSubmitJob
 func Java_com_printcat_app_PrintCatPrintService_nativeSubmitJob(
 	env *C.JNIEnv,

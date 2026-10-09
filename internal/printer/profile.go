@@ -15,6 +15,14 @@ const (
 	MediaContinuous MediaType = "continuous"
 )
 
+// PrinterProfile describes the physical and logical capabilities of a
+// printer. Fields are filled in from the saved printer configuration and
+// travel with the printer definition through the pipeline into the
+// protocol backends.
+//
+// Density is the raster binarization threshold used by the ESC/POS
+// encoder. It is ignored by all other protocol backends. Valid range is
+// 1-254; a value <= 0 means "use the encoder default".
 type PrinterProfile struct {
 	Vendor              string          `json:"vendor,omitempty"`
 	Model               string          `json:"model,omitempty"`
@@ -27,12 +35,14 @@ type PrinterProfile struct {
 	MonochromeOnly      bool            `json:"monochromeOnly,omitempty"`
 	SupportedProtocols  []Protocol      `json:"supportedProtocols,omitempty"`
 	SupportedTransports []TransportKind `json:"supportedTransports,omitempty"`
+	// Density is the raster threshold for ESC/POS. 0 or negative means
+	// "use the encoder default (160)".
+	Density int `json:"density,omitempty"`
 }
 
 func (p PrinterProfile) Validate() error {
 	if p.DPI <= 0 {
 		return fmt.Errorf("DPI must be positive (got %d)", p.DPI)
 	}
-
 	return nil
 }

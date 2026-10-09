@@ -13,17 +13,31 @@ import (
 // SavedPrinter is a printer the user has explicitly saved to persistent
 // configuration. It bundles the underlying printer definition with the
 // per-printer paper dimensions chosen by the user.
+//
+// PaperWidthMm/PaperHeightMm describe the physical paper media that is
+// advertised to Android Print Framework as the MediaSize.
+//
+// PrintableWidthMm describes the print head width in millimetres. It is a
+// separate concept from the paper width: a 58 mm roll typically has a
+// 48 mm print head, and content placed outside the print head cannot be
+// printed. When PrintableWidthMm > 0:
+//   - it is mirrored into printer.Printer.Profile.MediaWidth (µm);
+//   - Android Print Framework is told (via MinMargins) to keep content
+//     within the leftmost PrintableWidthMm of the page;
+//   - the ESC/POS encoder crops any raster wider than the printable width
+//     to the leftmost PrintableWidthMm dots before packing, so the print
+//     head never receives data it cannot print.
+//
+// When PrintableWidthMm is 0, no cropping and no margin adjustment occurs:
+// the physical paper width is used as-is, matching the previous behaviour.
 type SavedPrinter struct {
-	Printer       printer.Printer `json:"printer"`
-	PaperWidthMm  int             `json:"paperWidthMm,omitempty"`
-	PaperHeightMm int             `json:"paperHeightMm,omitempty"`
+	Printer          printer.Printer `json:"printer"`
+	PaperWidthMm     int             `json:"paperWidthMm,omitempty"`
+	PaperHeightMm    int             `json:"paperHeightMm,omitempty"`
+	PrintableWidthMm int             `json:"printableWidthMm,omitempty"`
 }
 
 // Config is the versioned root of PrintCat user configuration.
-//
-// Version 2 introduced multi-printer support: SavedPrinters holds an
-// ordered list of user-saved printers, and ActivePrinterID points at the
-// entry that external print jobs (Android Print Framework) should use.
 type Config struct {
 	Version          int            `json:"version"`
 	SelectedPrinter  string         `json:"selectedPrinter,omitempty"`
@@ -41,9 +55,7 @@ func Default() Config {
 }
 
 // Load reads Config from path, migrating legacy single-printer configs into
-// the multi-printer format on the fly. If the file does not exist, Default
-// is returned with a nil error so first-run code can call Load
-// unconditionally.
+// the multi-printer format on the fly.
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -59,9 +71,7 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// Save writes Config to path, creating parent directories as needed. It
-// always writes the current (version 2) structure; legacy fields are not
-// serialized.
+// Save writes Config to path, creating parent directories as needed.
 func Save(path string, cfg Config) error {
 	if cfg.Version < 2 {
 		cfg.Version = 2
@@ -81,10 +91,7 @@ func Save(path string, cfg Config) error {
 	return nil
 }
 
-// UnmarshalJSON handles migration from the legacy single-printer config
-// format (version 1) into the multi-printer format (version 2). It also
-// tolerates the intermediate shape used during an earlier Step 1C iteration
-// where paperWidthMm/paperHeightMm lived at the top level.
+// UnmarshalJSON handles migration from the legacy single-printer config.
 func (c *Config) UnmarshalJSON(data []byte) error {
 	type alias struct {
 		Version          int            `json:"version"`
@@ -93,7 +100,6 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 		SavedPrinters    []SavedPrinter `json:"savedPrinters,omitempty"`
 		ActivePrinterID  string         `json:"activePrinterId,omitempty"`
 
-		// Legacy v1 fields:
 		ActivePrinter *printer.Printer `json:"activePrinter,omitempty"`
 		PaperWidthMm  int              `json:"paperWidthMm,omitempty"`
 		PaperHeightMm int              `json:"paperHeightMm,omitempty"`
@@ -109,7 +115,6 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	c.SavedPrinters = a.SavedPrinters
 	c.ActivePrinterID = a.ActivePrinterID
 
-	// Migration: fold the legacy single activePrinter into the saved list.
 	if a.ActivePrinter != nil && len(c.SavedPrinters) == 0 {
 		c.SavedPrinters = []SavedPrinter{{
 			Printer:       *a.ActivePrinter,
@@ -127,8 +132,7 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// FindSavedPrinter returns a pointer to the saved printer with the given
-// ID (matched against printer.Printer.ID), or nil if not found.
+// FindSavedPrinter returns a pointer to the saved printer with the given ID.
 func (c *Config) FindSavedPrinter(id string) *SavedPrinter {
 	for i := range c.SavedPrinters {
 		if c.SavedPrinters[i].Printer.ID == id {
@@ -138,8 +142,7 @@ func (c *Config) FindSavedPrinter(id string) *SavedPrinter {
 	return nil
 }
 
-// ActiveSavedPrinter returns the saved printer referenced by
-// ActivePrinterID, or nil if there is no active printer.
+// ActiveSavedPrinter returns the saved printer referenced by ActivePrinterID.
 func (c *Config) ActiveSavedPrinter() *SavedPrinter {
 	if c.ActivePrinterID == "" {
 		return nil
@@ -147,8 +150,7 @@ func (c *Config) ActiveSavedPrinter() *SavedPrinter {
 	return c.FindSavedPrinter(c.ActivePrinterID)
 }
 
-// UpsertSavedPrinter adds a new saved printer or replaces the existing one
-// with the same Printer.ID. Returns true if the printer was newly added.
+// UpsertSavedPrinter adds or replaces a saved printer by Printer.ID.
 func (c *Config) UpsertSavedPrinter(sp SavedPrinter) bool {
 	for i := range c.SavedPrinters {
 		if c.SavedPrinters[i].Printer.ID == sp.Printer.ID {
@@ -160,9 +162,7 @@ func (c *Config) UpsertSavedPrinter(sp SavedPrinter) bool {
 	return true
 }
 
-// RemoveSavedPrinter removes the saved printer with the given ID. If the
-// removed printer was active, ActivePrinterID is cleared. Returns true if a
-// printer was removed.
+// RemoveSavedPrinter removes the saved printer with the given ID.
 func (c *Config) RemoveSavedPrinter(id string) bool {
 	for i := range c.SavedPrinters {
 		if c.SavedPrinters[i].Printer.ID == id {
@@ -177,7 +177,6 @@ func (c *Config) RemoveSavedPrinter(id string) bool {
 }
 
 // SetActivePrinter marks the saved printer with the given ID as active.
-// Returns false if no saved printer with that ID exists.
 func (c *Config) SetActivePrinter(id string) bool {
 	if c.FindSavedPrinter(id) == nil {
 		return false

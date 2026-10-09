@@ -28,10 +28,16 @@ import (
 	"github.com/timboli111/PrintCat/internal/editor"
 	"github.com/timboli111/PrintCat/internal/platform"
 	"github.com/timboli111/PrintCat/internal/printer"
+	"github.com/timboli111/PrintCat/internal/printer/transport/usb"
 	"github.com/timboli111/PrintCat/internal/render/basic"
 )
 
 const appID = "com.printcat.app"
+
+// defaultDensity is the fallback ESC/POS raster binarization threshold when
+// the saved printer does not have Density set. Mirrors
+// escpos.defaultBinarizeThreshold.
+const defaultDensity = 160
 
 func New() fyne.App {
 	application := app.NewWithID(appID)
@@ -46,8 +52,6 @@ func discoverBluetoothPrinters(ctx context.Context, window fyne.Window) ([]platf
 		return nil, nil
 	}
 
-	// Bluetooth Connect and Scan permissions are the modern (API 31+) ones.
-	// On API < 31 they are no-ops.
 	if platform.GetAndroidAPIVersion() >= 31 {
 		connectGranted, err := platform.EnsureBluetoothConnectPermission(ctx)
 		if err != nil {
@@ -66,12 +70,6 @@ func discoverBluetoothPrinters(ctx context.Context, window fyne.Window) ([]platf
 		return nil, fmt.Errorf("bluetooth scan permission denied")
 	}
 
-	// ACCESS_FINE_LOCATION: on API 24-30 this is already covered by
-	// EnsureBluetoothScanPermission above; ensureFineLocationPermission
-	// returns true immediately there. On API 31+ some OEM ROMs (MIUI /
-	// Redmi) still require it before startDiscovery() will succeed, even
-	// though AOSP does not. We request it here, before discovery, and
-	// verify it is really granted.
 	fineGranted, err := platform.EnsureFineLocationPermission(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("location permission error: %w", err)
@@ -84,6 +82,18 @@ func discoverBluetoothPrinters(ctx context.Context, window fyne.Window) ([]platf
 	discovered, err := integration.Discover(ctx, printer.BluetoothClassic)
 	if err != nil {
 		return nil, fmt.Errorf("discovery failed: %w", err)
+	}
+	return discovered, nil
+}
+
+func discoverUSBPrinters(ctx context.Context) ([]platform.Device, error) {
+	if runtime.GOOS != "android" {
+		return nil, nil
+	}
+	integration := platform.GetIntegration()
+	discovered, err := integration.Discover(ctx, printer.USB)
+	if err != nil {
+		return nil, fmt.Errorf("usb discovery failed: %w", err)
 	}
 	return discovered, nil
 }
@@ -109,9 +119,10 @@ var printerProtocolOptions = []string{"ESCPOS", "TSPL", "ZPL", "CPCL", "EPL", "S
 var printerTransports = map[string]printer.TransportKind{
 	"TCP":               printer.TCP,
 	"Bluetooth Classic": printer.BluetoothClassic,
+	"USB":               printer.USB,
 }
 
-var printerTransportOptions = []string{"TCP", "Bluetooth Classic"}
+var printerTransportOptions = []string{"TCP", "Bluetooth Classic", "USB"}
 
 func protocolDisplayName(p printer.Protocol) string {
 	for name, candidate := range printerProtocols {
@@ -142,6 +153,14 @@ func NewWindow(application fyne.App) fyne.Window {
 		dialog.ShowError(fmt.Errorf("failed to initialize print engine"), window)
 		return window
 	}
+	// Register USB transport in addition to whatever Bootstrap already
+	// registered (TCP + Bluetooth). USB registration is idempotent: if a
+	// future Bootstrap registers it, this call will return an error and we
+	// can safely ignore it.
+	if err := service.RegisterTransport(&usb.USBTransport{}); err != nil {
+		// Ignore "already registered" — the transport exists.
+	}
+
 	renderer := &basic.Renderer{}
 	bridgeState := bridge.GetGlobal()
 	if bridgeState == nil {
@@ -500,7 +519,7 @@ func NewWindow(application fyne.App) fyne.Window {
 		}
 
 		var initialName, initialEndpoint string
-		var initialDPI int
+		var initialDPI, initialDensity int
 		var initialProtocol printer.Protocol
 		var initialTransport printer.TransportKind
 		var baseProfile printer.PrinterProfile
@@ -509,6 +528,7 @@ func NewWindow(application fyne.App) fyne.Window {
 			initialName = sp.Printer.Name
 			initialEndpoint = sp.Printer.Connection.Endpoint
 			initialDPI = sp.Printer.Profile.DPI
+			initialDensity = sp.Printer.Profile.Density
 			initialProtocol = sp.Printer.Connection.Protocol
 			initialTransport = sp.Printer.Connection.Transport
 			baseProfile = sp.Printer.Profile
@@ -516,11 +536,12 @@ func NewWindow(application fyne.App) fyne.Window {
 			initialName = dev.Name
 			initialEndpoint = dev.Endpoint
 			initialDPI = dev.Profile.DPI
+			initialDensity = dev.Profile.Density
 			baseProfile = dev.Profile
 			initialProtocol = printer.ESCPOS
-			initialTransport = printer.BluetoothClassic
-			if dev.Kind == printer.TCP {
-				initialTransport = printer.TCP
+			initialTransport = dev.Kind
+			if initialTransport == "" {
+				initialTransport = printer.BluetoothClassic
 			}
 		}
 		if initialDPI <= 0 {
@@ -538,8 +559,10 @@ func NewWindow(application fyne.App) fyne.Window {
 		nameEntry := widget.NewEntry()
 		endpointEntry := widget.NewEntry()
 		dpiEntry := widget.NewEntry()
+		densityEntry := widget.NewEntry()
 		paperWidthEntry := widget.NewEntry()
 		paperHeightEntry := widget.NewEntry()
+		printableWidthEntry := widget.NewEntry()
 		errorLabel := widget.NewLabel("")
 
 		protocolSelect.SetSelected(protocolDisplayName(initialProtocol))
@@ -547,6 +570,11 @@ func NewWindow(application fyne.App) fyne.Window {
 		nameEntry.SetText(initialName)
 		endpointEntry.SetText(initialEndpoint)
 		dpiEntry.SetText(strconv.Itoa(initialDPI))
+		if initialDensity > 0 {
+			densityEntry.SetText(strconv.Itoa(initialDensity))
+		} else {
+			densityEntry.SetText(strconv.Itoa(defaultDensity))
+		}
 		if sp != nil && sp.PaperWidthMm > 0 {
 			paperWidthEntry.SetText(strconv.Itoa(sp.PaperWidthMm))
 		} else {
@@ -557,13 +585,16 @@ func NewWindow(application fyne.App) fyne.Window {
 		} else {
 			paperHeightEntry.SetText("200")
 		}
+		if sp != nil && sp.PrintableWidthMm > 0 {
+			printableWidthEntry.SetText(strconv.Itoa(sp.PrintableWidthMm))
+		}
 
 		title := "Add Printer"
 		if sp != nil {
 			title = "Configure Printer"
 		}
 		configWindow := application.NewWindow(title)
-		configWindow.Resize(fyne.NewSize(420, 560))
+		configWindow.Resize(fyne.NewSize(420, 680))
 
 		applyButton := widget.NewButton("Apply", func() {
 			errorLabel.SetText("")
@@ -592,6 +623,11 @@ func NewWindow(application fyne.App) fyne.Window {
 				errorLabel.SetText("DPI must be a positive integer")
 				return
 			}
+			density, errDensity := strconv.Atoi(densityEntry.Text)
+			if errDensity != nil || density < 1 || density > 254 {
+				errorLabel.SetText("Density must be an integer between 1 and 254")
+				return
+			}
 			pw, errW := strconv.Atoi(paperWidthEntry.Text)
 			if errW != nil || pw <= 0 {
 				errorLabel.SetText("Paper width must be a positive integer")
@@ -600,6 +636,19 @@ func NewWindow(application fyne.App) fyne.Window {
 			ph, errH := strconv.Atoi(paperHeightEntry.Text)
 			if errH != nil || ph <= 0 {
 				errorLabel.SetText("Paper height must be a positive integer")
+				return
+			}
+			printableWidth := 0
+			if printableWidthEntry.Text != "" {
+				pwi, errP := strconv.Atoi(printableWidthEntry.Text)
+				if errP != nil || pwi < 0 {
+					errorLabel.SetText("Printable width must be a non-negative integer (0 = same as paper)")
+					return
+				}
+				printableWidth = pwi
+			}
+			if printableWidth > 0 && printableWidth > pw {
+				errorLabel.SetText("Printable width cannot exceed paper width")
 				return
 			}
 
@@ -614,6 +663,12 @@ func NewWindow(application fyne.App) fyne.Window {
 
 			profile := baseProfile
 			profile.DPI = dpi
+			profile.Density = density
+			if printableWidth > 0 {
+				profile.MediaWidth = document.Unit(printableWidth) * 1000
+			} else {
+				profile.MediaWidth = 0
+			}
 
 			savedPrinter := config.SavedPrinter{
 				Printer: printer.Printer{
@@ -626,8 +681,9 @@ func NewWindow(application fyne.App) fyne.Window {
 					},
 					Profile: profile,
 				},
-				PaperWidthMm:  pw,
-				PaperHeightMm: ph,
+				PaperWidthMm:     pw,
+				PaperHeightMm:    ph,
+				PrintableWidthMm: printableWidth,
 			}
 
 			if err := savedPrinter.Printer.Validate(); err != nil {
@@ -652,7 +708,7 @@ func NewWindow(application fyne.App) fyne.Window {
 		form := container.NewVBox(
 			widget.NewLabelWithStyle("Name:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			nameEntry,
-			widget.NewLabelWithStyle("Endpoint (MAC / host:port):", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			widget.NewLabelWithStyle("Endpoint (MAC / host:port / usb-device-id):", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			endpointEntry,
 			widget.NewLabelWithStyle("Protocol:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			protocolSelect,
@@ -660,10 +716,14 @@ func NewWindow(application fyne.App) fyne.Window {
 			transportSelect,
 			widget.NewLabelWithStyle("DPI:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			dpiEntry,
+			widget.NewLabelWithStyle("Density (1-254):", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			densityEntry,
 			widget.NewLabelWithStyle("Paper width (mm):", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			paperWidthEntry,
 			widget.NewLabelWithStyle("Paper height (mm):", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			paperHeightEntry,
+			widget.NewLabelWithStyle("Printable width (mm, 0 = same as paper):", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			printableWidthEntry,
 			errorLabel,
 			container.NewHBox(applyButton, cancelButton),
 		)
@@ -913,7 +973,7 @@ func NewWindow(application fyne.App) fyne.Window {
 	}
 
 	buildScanPrinterScreen := func() fyne.CanvasObject {
-		statusLabel := widget.NewLabel("Tap Scan to discover printers")
+		statusLabel := widget.NewLabel("Tap a Scan button to discover printers")
 
 		savedRows := container.NewVBox()
 		discoveredRows := container.NewVBox()
@@ -945,13 +1005,17 @@ func NewWindow(application fyne.App) fyne.Window {
 					if titleText == "" {
 						titleText = spCopy.Printer.Connection.Endpoint
 					}
-					subtitle := fmt.Sprintf("%s  |  %s / %s  |  DPI %d",
+					subtitle := fmt.Sprintf("%s  |  %s / %s  |  DPI %d  |  Density %d",
 						spCopy.Printer.Connection.Endpoint,
 						protocolDisplayName(spCopy.Printer.Connection.Protocol),
 						transportDisplayName(spCopy.Printer.Connection.Transport),
-						spCopy.Printer.Profile.DPI)
+						spCopy.Printer.Profile.DPI,
+						spCopy.Printer.Profile.Density)
 					if spCopy.PaperWidthMm > 0 && spCopy.PaperHeightMm > 0 {
 						subtitle += fmt.Sprintf("  |  %dx%d mm", spCopy.PaperWidthMm, spCopy.PaperHeightMm)
+					}
+					if spCopy.PrintableWidthMm > 0 {
+						subtitle += fmt.Sprintf("  |  printable %d mm", spCopy.PrintableWidthMm)
 					}
 
 					titleLabel := widget.NewLabelWithStyle(titleText, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
@@ -1020,7 +1084,7 @@ func NewWindow(application fyne.App) fyne.Window {
 						titleText = devCopy.Endpoint
 					}
 					titleLabel := widget.NewLabelWithStyle(titleText, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-					subLabel := widget.NewLabel(devCopy.Endpoint)
+					subLabel := widget.NewLabel(fmt.Sprintf("[%s] %s", devCopy.Kind, devCopy.Endpoint))
 					info := container.NewVBox(titleLabel, subLabel)
 
 					var existing *config.SavedPrinter
@@ -1065,32 +1129,64 @@ func NewWindow(application fyne.App) fyne.Window {
 		renderSavedRows()
 		renderDiscoveredRows()
 
-		var isScanning bool
-		scanButton := widget.NewButton("Scan", nil)
-		scanButton.OnTapped = func() {
-			if isScanning {
+		var isScanningBT bool
+		scanBTButton := widget.NewButton("Scan Bluetooth", nil)
+		scanBTButton.OnTapped = func() {
+			if isScanningBT {
 				return
 			}
-			isScanning = true
-			scanButton.Disable()
-			statusLabel.SetText("Scanning...")
+			isScanningBT = true
+			scanBTButton.Disable()
+			statusLabel.SetText("Scanning Bluetooth...")
 
 			go func() {
 				ctx := context.Background()
 				results, err := discoverBluetoothPrinters(ctx, window)
 				fyne.Do(func() {
-					isScanning = false
-					scanButton.Enable()
+					isScanningBT = false
+					scanBTButton.Enable()
 					if err != nil {
-						statusLabel.SetText(fmt.Sprintf("Scan error: %v", err))
-						dialog.ShowError(fmt.Errorf("discovery error: %w", err), window)
+						statusLabel.SetText(fmt.Sprintf("Bluetooth scan error: %v", err))
+						dialog.ShowError(fmt.Errorf("bluetooth discovery error: %w", err), window)
 						return
 					}
 					discovered = results
 					if len(results) == 0 {
-						statusLabel.SetText("No printers found")
+						statusLabel.SetText("No Bluetooth printers found")
 					} else {
-						statusLabel.SetText(fmt.Sprintf("Found %d printer(s)", len(results)))
+						statusLabel.SetText(fmt.Sprintf("Found %d Bluetooth printer(s)", len(results)))
+					}
+					renderDiscoveredRows()
+				})
+			}()
+		}
+
+		var isScanningUSB bool
+		scanUSBButton := widget.NewButton("Scan USB", nil)
+		scanUSBButton.OnTapped = func() {
+			if isScanningUSB {
+				return
+			}
+			isScanningUSB = true
+			scanUSBButton.Disable()
+			statusLabel.SetText("Scanning USB...")
+
+			go func() {
+				ctx := context.Background()
+				results, err := discoverUSBPrinters(ctx)
+				fyne.Do(func() {
+					isScanningUSB = false
+					scanUSBButton.Enable()
+					if err != nil {
+						statusLabel.SetText(fmt.Sprintf("USB scan error: %v", err))
+						dialog.ShowError(fmt.Errorf("usb discovery error: %w", err), window)
+						return
+					}
+					discovered = results
+					if len(results) == 0 {
+						statusLabel.SetText("No USB printers found")
+					} else {
+						statusLabel.SetText(fmt.Sprintf("Found %d USB printer(s)", len(results)))
 					}
 					renderDiscoveredRows()
 				})
@@ -1103,7 +1199,8 @@ func NewWindow(application fyne.App) fyne.Window {
 			}),
 			widget.NewLabelWithStyle("Scan Printer", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			layout.NewSpacer(),
-			scanButton,
+			scanBTButton,
+			scanUSBButton,
 		)
 
 		body := container.NewVBox(
@@ -1129,8 +1226,10 @@ func NewWindow(application fyne.App) fyne.Window {
 		protocolSelect := widget.NewSelect(printerProtocolOptions, nil)
 		transportSelect := widget.NewSelect(printerTransportOptions, nil)
 		dpiEntry := widget.NewEntry()
+		densityEntry := widget.NewEntry()
 		paperWidthEntry := widget.NewEntry()
 		paperHeightEntry := widget.NewEntry()
+		printableWidthEntry := widget.NewEntry()
 		statusLabel := widget.NewLabel("")
 
 		nameLabel := widget.NewLabel("")
@@ -1147,6 +1246,11 @@ func NewWindow(application fyne.App) fyne.Window {
 			} else {
 				dpiEntry.SetText("203")
 			}
+			if activeCopy.Printer.Profile.Density > 0 {
+				densityEntry.SetText(strconv.Itoa(activeCopy.Printer.Profile.Density))
+			} else {
+				densityEntry.SetText(strconv.Itoa(defaultDensity))
+			}
 			if activeCopy.PaperWidthMm > 0 {
 				paperWidthEntry.SetText(strconv.Itoa(activeCopy.PaperWidthMm))
 			} else {
@@ -1157,14 +1261,19 @@ func NewWindow(application fyne.App) fyne.Window {
 			} else {
 				paperHeightEntry.SetText("200")
 			}
+			if activeCopy.PrintableWidthMm > 0 {
+				printableWidthEntry.SetText(strconv.Itoa(activeCopy.PrintableWidthMm))
+			}
 		} else {
 			nameLabel.SetText("No active printer configured")
 			endpointLabel.SetText("Use Scan Printer to add and activate a printer first.")
 			protocolSelect.SetSelected("ESCPOS")
 			transportSelect.SetSelected("Bluetooth Classic")
 			dpiEntry.SetText("203")
+			densityEntry.SetText(strconv.Itoa(defaultDensity))
 			paperWidthEntry.SetText("80")
 			paperHeightEntry.SetText("200")
+			printableWidthEntry.SetText("")
 		}
 
 		saveButton := widget.NewButton("Save", func() {
@@ -1194,6 +1303,11 @@ func NewWindow(application fyne.App) fyne.Window {
 				statusLabel.SetText("DPI must be a positive integer")
 				return
 			}
+			density, errDensity := strconv.Atoi(densityEntry.Text)
+			if errDensity != nil || density < 1 || density > 254 {
+				statusLabel.SetText("Density must be an integer between 1 and 254")
+				return
+			}
 			pw, errW := strconv.Atoi(paperWidthEntry.Text)
 			if errW != nil || pw <= 0 {
 				statusLabel.SetText("Paper width must be a positive integer")
@@ -1204,12 +1318,32 @@ func NewWindow(application fyne.App) fyne.Window {
 				statusLabel.SetText("Paper height must be a positive integer")
 				return
 			}
+			printableWidth := 0
+			if printableWidthEntry.Text != "" {
+				pwi, errP := strconv.Atoi(printableWidthEntry.Text)
+				if errP != nil || pwi < 0 {
+					statusLabel.SetText("Printable width must be a non-negative integer (0 = same as paper)")
+					return
+				}
+				printableWidth = pwi
+			}
+			if printableWidth > 0 && printableWidth > pw {
+				statusLabel.SetText("Printable width cannot exceed paper width")
+				return
+			}
 
 			ap.Printer.Connection.Protocol = selectedProtocol
 			ap.Printer.Connection.Transport = selectedTransport
 			ap.Printer.Profile.DPI = dpi
+			ap.Printer.Profile.Density = density
+			if printableWidth > 0 {
+				ap.Printer.Profile.MediaWidth = document.Unit(printableWidth) * 1000
+			} else {
+				ap.Printer.Profile.MediaWidth = 0
+			}
 			ap.PaperWidthMm = pw
 			ap.PaperHeightMm = ph
+			ap.PrintableWidthMm = printableWidth
 
 			if err := config.Save(configPath, current); err != nil {
 				statusLabel.SetText(fmt.Sprintf("Save failed: %v", err))
@@ -1245,10 +1379,13 @@ func NewWindow(application fyne.App) fyne.Window {
 			transportSelect,
 			widget.NewLabelWithStyle("DPI", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			dpiEntry,
+			widget.NewLabelWithStyle("Density (1-254, ESC/POS only)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			densityEntry,
 			widget.NewSeparator(),
 			widget.NewLabelWithStyle("Paper", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			container.NewHBox(widget.NewLabel("Width (mm)"), paperWidthEntry),
 			container.NewHBox(widget.NewLabel("Height (mm)"), paperHeightEntry),
+			container.NewHBox(widget.NewLabel("Printable (mm)"), printableWidthEntry),
 			widget.NewSeparator(),
 			saveButton,
 			statusLabel,
