@@ -8,11 +8,20 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/timboli111/PrintCat/internal/document"
 	"github.com/timboli111/PrintCat/internal/printer"
 	"github.com/timboli111/PrintCat/internal/render"
 )
+
+// multiPageSettleDelay is the pause inserted between consecutive pages of
+// a multi-page print job. Each page is sent as its own connect/write/flush/
+// close cycle through the transport, and some printers / Android Bluetooth
+// stacks are not ready to accept a new RFCOMM connection immediately after
+// the previous one closed. Single-page jobs are unaffected: the delay is
+// only applied before page index > 0.
+const multiPageSettleDelay = 500 * time.Millisecond
 
 // SubmitRequest describes one logical print job submitted from outside
 // PrintCat (for example, from the Android Print Framework). Each page is a
@@ -131,6 +140,13 @@ func (s *State) Submit(ctx context.Context, req SubmitRequest) error {
 	target.Profile.DPI = req.DPI
 
 	for i := range req.Pages {
+		if i > 0 {
+			select {
+			case <-time.After(multiPageSettleDelay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 		widthUm := req.PageWidthsUm[i]
 		heightUm := req.PageHeightsUm[i]
 		if widthUm <= 0 || heightUm <= 0 {

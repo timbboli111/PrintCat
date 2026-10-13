@@ -11,9 +11,11 @@ import (
 )
 
 /*
+#cgo LDFLAGS: -llog
 #include <jni.h>
 #include <stdlib.h>
 #include <string.h>
+#include <android/log.h>
 
 // SPP UUID: 00001101-0000-1000-8000-00805F9B34FB
 static const char* SPP_UUID = "00001101-0000-1000-8000-00805F9B34FB";
@@ -341,6 +343,8 @@ static int bluetooth_send(
         (*env)->DeleteLocalRef(env, socket);
         return -1;
     }
+    __android_log_print(ANDROID_LOG_DEBUG, "PrintCatBt",
+                        "connect ok");
 
     // 7. BluetoothSocket.getOutputStream() -> OutputStream
     jmethodID getOutputStream = (*env)->GetMethodID(env, socketClass, "getOutputStream", "()Ljava/io/OutputStream;");
@@ -448,10 +452,42 @@ static int bluetooth_send(
             return -1;
         }
         (*env)->DeleteLocalRef(env, jPayload);
+        __android_log_print(ANDROID_LOG_DEBUG, "PrintCatBt",
+                            "write ok (%zu bytes)", len);
+    }
+
+    // 8b. OutputStream.flush()
+    // Flush is best-effort at the Java API level for BluetoothSocket, but
+    // calling it explicitly gives the RFCOMM stack a chance to hand off
+    // any buffered bytes before the socket is closed. Without this, closing
+    // the socket immediately after write() can truncate the last frame on
+    // some Android builds.
+    jmethodID flush = (*env)->GetMethodID(env, outputStreamClass, "flush", "()V");
+    if (flush == NULL) {
+        // The runtime class did not expose flush(); clear any pending
+        // NoSuchMethodError and continue. This should not happen for
+        // java.io.OutputStream subclasses.
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+        }
+        __android_log_print(ANDROID_LOG_WARN, "PrintCatBt",
+                            "flush method missing; skipping");
+    } else {
+        (*env)->CallVoidMethod(env, outputStream, flush);
+        if (check_exception(env, "CallVoidMethod(flush)", error_msg) != 0) {
+            close_socket_safe(env, socket);
+            (*env)->DeleteLocalRef(env, outputStreamClass);
+            (*env)->DeleteLocalRef(env, outputStream);
+            (*env)->DeleteLocalRef(env, socketClass);
+            (*env)->DeleteLocalRef(env, socket);
+            return -1;
+        }
+        __android_log_print(ANDROID_LOG_DEBUG, "PrintCatBt", "flush ok");
     }
 
     // 9. Tutup socket dan bersihkan resources
     close_socket_safe(env, socket);
+    __android_log_print(ANDROID_LOG_DEBUG, "PrintCatBt", "socket closed");
     (*env)->DeleteLocalRef(env, outputStreamClass);
     (*env)->DeleteLocalRef(env, outputStream);
     (*env)->DeleteLocalRef(env, socketClass);

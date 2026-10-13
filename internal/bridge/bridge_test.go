@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -111,5 +112,76 @@ func TestSubmitRejectsInvalidDPI(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for invalid DPI")
+	}
+}
+
+// TestSubmitSinglePageHasNoSettleDelay proves the multi-page settle delay
+// is not applied to single-page jobs. The test is deterministic: it relies
+// on a context timeout that is strictly shorter than multiPageSettleDelay.
+// If any delay were introduced before page 0 (or on the single-page path),
+// the context would expire during that wait and Submit would return an
+// error instead of success. No wall-clock measurement is used, so the
+// result does not depend on how busy the test machine is.
+func TestSubmitSinglePageHasNoSettleDelay(t *testing.T) {
+	s, tr := newTestState(t)
+	p := &printer.Printer{
+		ID:         "test",
+		Connection: printer.Connection{Protocol: printer.ZPL, Transport: printer.TCP},
+		Profile:    printer.PrinterProfile{DPI: 203},
+	}
+	s.SetActivePrinter(p)
+
+	ctx, cancel := context.WithTimeout(context.Background(),
+		multiPageSettleDelay/5)
+	defer cancel()
+
+	err := s.Submit(ctx, SubmitRequest{
+		Pages:         [][]byte{{0xAA}},
+		PageWidthsUm:  []int64{10000},
+		PageHeightsUm: []int64{10000},
+		DPI:           203,
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v (single-page must not wait for settle delay)", err)
+	}
+	if len(tr.Payloads) != 1 {
+		t.Fatalf("expected 1 payload, got %d", len(tr.Payloads))
+	}
+}
+
+// TestSubmitMultiPageHonorsContextCancellation proves the settle delay
+// between pages is cancellable: a two-page job with a context deadline
+// shorter than multiPageSettleDelay must return DeadlineExceeded after
+// sending only the first page. This also confirms the delay is actually
+// awaited between pages, since without it both pages would be sent well
+// within the deadline.
+func TestSubmitMultiPageHonorsContextCancellation(t *testing.T) {
+	s, tr := newTestState(t)
+	p := &printer.Printer{
+		ID:         "test",
+		Connection: printer.Connection{Protocol: printer.ZPL, Transport: printer.TCP},
+		Profile:    printer.PrinterProfile{DPI: 203},
+	}
+	s.SetActivePrinter(p)
+
+	ctx, cancel := context.WithTimeout(context.Background(),
+		multiPageSettleDelay/5)
+	defer cancel()
+
+	err := s.Submit(ctx, SubmitRequest{
+		Pages:         [][]byte{{0xAA}, {0xBB}},
+		PageWidthsUm:  []int64{10000, 10000},
+		PageHeightsUm: []int64{10000, 10000},
+		DPI:           203,
+	})
+	if err == nil {
+		t.Fatal("expected context deadline error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected DeadlineExceeded, got %v", err)
+	}
+	if len(tr.Payloads) != 1 {
+		t.Errorf("expected 1 payload sent before cancellation, got %d",
+			len(tr.Payloads))
 	}
 }
