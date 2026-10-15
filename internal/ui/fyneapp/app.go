@@ -7,7 +7,6 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -103,6 +102,21 @@ func savedPrinterDisplay(sp config.SavedPrinter) string {
 		return fmt.Sprintf("%s (%s)", sp.Printer.Name, sp.Printer.Connection.Endpoint)
 	}
 	return fmt.Sprintf("Unknown (%s)", sp.Printer.Connection.Endpoint)
+}
+
+// formatByteSize renders a byte count as a short human-readable string.
+// It is used by the file picker so that the reported size is derived from
+// the bytes actually read, rather than from an os.Stat call that may not
+// work on Android Storage Access Framework URIs.
+func formatByteSize(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	}
 }
 
 var printerProtocols = map[string]printer.Protocol{
@@ -272,7 +286,9 @@ func NewWindow(application fyne.App) fyne.Window {
 	var addText *widget.Button
 	var addImage *widget.Button
 	var deleteButton *widget.Button
+	var rotateButton *widget.Button
 	var previewButton *widget.Button
+	var printAction func()
 
 	if runtime.GOOS == "android" {
 		addText = widget.NewButton("Text", func() {
@@ -289,9 +305,15 @@ func NewWindow(application fyne.App) fyne.Window {
 				defer reader.Close()
 				data, err := io.ReadAll(reader)
 				if err != nil {
+					dialog.ShowError(fmt.Errorf("read image: %w", err), window)
 					return
 				}
-				if err := ed.AddImageFitToPage(data, "image/png"); err != nil {
+				mime, err := editor.DetectImageMime(data)
+				if err != nil {
+					dialog.ShowError(fmt.Errorf("open image: %w", err), window)
+					return
+				}
+				if err := ed.AddImageFitToPage(data, mime); err != nil {
 					dialog.ShowError(fmt.Errorf("open image: %w", err), window)
 					return
 				}
@@ -302,8 +324,20 @@ func NewWindow(application fyne.App) fyne.Window {
 			ed.DeleteSelected()
 			canvasWidget.Refresh()
 		})
+		rotateButton = widget.NewButton("Rotate ↻", func() {
+			if ed.SelID == "" {
+				return
+			}
+			id := ed.SelID
+			if err := ed.RotateSelectedImage(); err != nil {
+				dialog.ShowError(fmt.Errorf("rotate image: %w", err), window)
+				return
+			}
+			canvasWidget.InvalidateObject(id)
+			canvasWidget.Refresh()
+		})
 		previewButton = widget.NewButton("Prev", func() {
-			ShowPreview(application, ed)
+			ShowPreview(application, ed, canvasWidget, printAction)
 		})
 	} else {
 		addText = widget.NewButton("Add Text", func() {
@@ -318,11 +352,17 @@ func NewWindow(application fyne.App) fyne.Window {
 					return
 				}
 				defer reader.Close()
-				data, err := os.ReadFile(reader.URI().Path())
+				data, err := io.ReadAll(reader)
 				if err != nil {
+					dialog.ShowError(fmt.Errorf("read image: %w", err), window)
 					return
 				}
-				if err := ed.AddImageFitToPage(data, "image/png"); err != nil {
+				mime, err := editor.DetectImageMime(data)
+				if err != nil {
+					dialog.ShowError(fmt.Errorf("open image: %w", err), window)
+					return
+				}
+				if err := ed.AddImageFitToPage(data, mime); err != nil {
 					dialog.ShowError(fmt.Errorf("open image: %w", err), window)
 					return
 				}
@@ -333,8 +373,20 @@ func NewWindow(application fyne.App) fyne.Window {
 			ed.DeleteSelected()
 			canvasWidget.Refresh()
 		})
+		rotateButton = widget.NewButton("Rotate ↻", func() {
+			if ed.SelID == "" {
+				return
+			}
+			id := ed.SelID
+			if err := ed.RotateSelectedImage(); err != nil {
+				dialog.ShowError(fmt.Errorf("rotate image: %w", err), window)
+				return
+			}
+			canvasWidget.InvalidateObject(id)
+			canvasWidget.Refresh()
+		})
 		previewButton = widget.NewButton("Preview", func() {
-			ShowPreview(application, ed)
+			ShowPreview(application, ed, canvasWidget, printAction)
 		})
 	}
 
@@ -773,7 +825,7 @@ func NewWindow(application fyne.App) fyne.Window {
 		}
 	}
 
-	printButton = widget.NewButton("Print", func() {
+	printAction = func() {
 		if isPrinting {
 			return
 		}
@@ -840,6 +892,9 @@ func NewWindow(application fyne.App) fyne.Window {
 				dialog.ShowInformation("Success", "Print job completed successfully.", window)
 			})
 		}()
+	}
+	printButton = widget.NewButton("Print", func() {
+		printAction()
 	})
 
 	refreshButton := widget.NewButton("Refresh", func() {
@@ -908,7 +963,7 @@ func NewWindow(application fyne.App) fyne.Window {
 			zoomOut, zoomIn, fitButton, zoomLabel,
 		)
 
-		toolsToolbar := container.NewHBox(addText, addImage, deleteButton, previewButton)
+		toolsToolbar := container.NewHBox(addText, addImage, deleteButton, rotateButton, previewButton)
 
 		bottomControls := container.NewVBox(
 			printerSelect,
@@ -940,7 +995,7 @@ func NewWindow(application fyne.App) fyne.Window {
 		leftPanel := container.NewVBox(
 			widget.NewLabel("Tools"),
 			container.NewHBox(addText, addImage),
-			container.NewHBox(deleteButton, previewButton),
+			container.NewHBox(deleteButton, rotateButton, previewButton),
 			widget.NewSeparator(),
 			printerLabel,
 			container.NewHBox(printerSelect, refreshButton),
@@ -1449,24 +1504,16 @@ func NewWindow(application fyne.App) fyne.Window {
 				path := uri.Path()
 				ext := uri.Extension()
 
-				var sizeStr string
-				info, statErr := os.Stat(path)
-				if statErr == nil {
-					sizeBytes := info.Size()
-					if sizeBytes < 1024 {
-						sizeStr = fmt.Sprintf("%d B", sizeBytes)
-					} else if sizeBytes < 1024*1024 {
-						sizeStr = fmt.Sprintf("%.1f KB", float64(sizeBytes)/1024)
-					} else {
-						sizeStr = fmt.Sprintf("%.1f MB", float64(sizeBytes)/(1024*1024))
-					}
-				}
-
 				data, readErr := io.ReadAll(reader)
 				if readErr != nil {
 					statusLabel.SetText("Error reading file")
 					return
 				}
+				if len(data) == 0 {
+					statusLabel.SetText("File is empty")
+					return
+				}
+				sizeStr := formatByteSize(int64(len(data)))
 
 				pendingFilePath = path
 				pendingFileData = data
@@ -1484,16 +1531,25 @@ func NewWindow(application fyne.App) fyne.Window {
 		chooseAnotherButton.OnTapped = openFilePicker
 
 		openInEditorButton.OnTapped = func() {
-			if pendingFilePath != "" {
-				if len(pendingFileData) > 0 {
-					ed.AddImage(pendingFileData, "image/png",
-						document.Point{X: 20_000, Y: 20_000},
-						document.Size{Width: 40_000, Height: 30_000})
-					canvasWidget.Refresh()
-				}
-				updateCombinedStatusDisplayUI()
-				window.SetContent(editorContent)
+			if pendingFilePath == "" {
+				return
 			}
+			if len(pendingFileData) == 0 {
+				dialog.ShowError(fmt.Errorf("file data is empty"), window)
+				return
+			}
+			mime, err := editor.DetectImageMime(pendingFileData)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("open file: %w", err), window)
+				return
+			}
+			if err := ed.AddImageFitToPage(pendingFileData, mime); err != nil {
+				dialog.ShowError(fmt.Errorf("add image: %w", err), window)
+				return
+			}
+			canvasWidget.Refresh()
+			updateCombinedStatusDisplayUI()
+			window.SetContent(editorContent)
 		}
 
 		header := container.NewHBox(

@@ -11,6 +11,11 @@ func NewTextElement(id, content string, bounds Rect, fontSize Unit) Element {
 	}
 }
 
+// NewImageElement creates an image element and seeds BaseSize with the
+// caller-provided bounds. BaseSize is the unrotated, unconstrained size of
+// the image; the editor uses it as the source of truth when recomputing
+// bounds across rotations, so that a rotation that had to shrink the
+// element to fit the page does not permanently reduce its size.
 func NewImageElement(id string, data []byte, mimeType string, bounds Rect) Element {
 	return Element{
 		ID:      id,
@@ -18,6 +23,10 @@ func NewImageElement(id string, data []byte, mimeType string, bounds Rect) Eleme
 		Bounds:  bounds,
 		ZIndex:  0,
 		Visible: true,
-		Data:    ImageData{Data: data, MimeType: mimeType},
+		Data: ImageData{
+			Data:     data,
+			MimeType: mimeType,
+			BaseSize: bounds.Size,
+		},
 	}
 }

@@ -122,6 +122,184 @@ func (e *Editor) AddImageFitToPage(data []byte, mime string) error {
 	return nil
 }
 
+// DetectImageMime inspects the leading bytes of data and returns the MIME
+// type for a supported image format. Supported formats are PNG and JPEG
+// (the blank imports at the top of this file register their decoders).
+// It never trusts the file extension or any caller-supplied hint.
+// Returns an error for empty, corrupt, or unsupported image data.
+func DetectImageMime(data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("image data is empty")
+	}
+	_, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("decode image: %w", err)
+	}
+	switch format {
+	case "jpeg":
+		return "image/jpeg", nil
+	case "png":
+		return "image/png", nil
+	default:
+		return "", fmt.Errorf("unsupported image format: %q", format)
+	}
+}
+
+// SelectedElement returns a pointer to the currently selected element in the
+// document, or nil if there is no selection or the selection is stale.
+func (e *Editor) SelectedElement() *document.Element {
+	if e.SelID == "" {
+		return nil
+	}
+	for i := range e.Doc.Elements {
+		if e.Doc.Elements[i].ID == e.SelID {
+			return &e.Doc.Elements[i]
+		}
+	}
+	return nil
+}
+
+// snapToQuarterTurn rounds deg to the nearest of 0, 90, 180, 270 (mod 360).
+// It is used to normalize potentially corrupted metadata before advancing
+// the rotation, so that bounds and pixel transform always agree.
+func snapToQuarterTurn(deg int) int {
+	d := ((deg % 360) + 360) % 360
+	switch {
+	case d < 45:
+		return 0
+	case d < 135:
+		return 90
+	case d < 225:
+		return 180
+	case d < 315:
+		return 270
+	default:
+		return 0
+	}
+}
+
+// RotateSelectedImage advances the rotation of the currently selected image
+// element by 90° clockwise.
+//
+// It is a no-op when nothing is selected, and it returns an error when the
+// selection is not an image. The pixel payload is never re-encoded: only the
+// ImageData.Rotation field changes, so both the Fyne preview and the print
+// rasterizer will apply the same rotation on top of the original bytes. This
+// avoids cumulative JPEG generation loss and any decoding cost when the user
+// presses the button.
+//
+// The element's intrinsic, unrotated size is stored on ImageData.BaseSize.
+// When the current bounds have been shrunk by a previous rotation to fit the
+// page, the new bounds are still computed from BaseSize, not from the shrunk
+// bounds, so repeated rotations do not shrink the element further.
+// Legacy elements (BaseSize zero) lazily acquire BaseSize from the current
+// bounds on their first rotation; this is safe because legacy elements have
+// Rotation=0, so their current bounds ARE the unrotated size.
+//
+// The rotated bounds are constrained to the page: if the desired size does
+// not fit within (page minus the same margin used by AddImageFitToPage), it
+// is scaled down proportionally, preserving aspect ratio and never cropping.
+// The visual centre is kept when the rotated element fits symmetrically;
+// otherwise the position is clamped back onto the page. The clamp uses
+// [0, pageSize], not [margin, pageSize-margin], because DefaultImageMargin
+// is a placement convention for newly imported images, not a hard
+// constraint on where the user may position content.
+func (e *Editor) RotateSelectedImage() error {
+	el := e.SelectedElement()
+	if el == nil {
+		return nil
+	}
+	if el.Type != document.ImageElement {
+		return fmt.Errorf("selection is not an image")
+	}
+	idata, ok := el.Data.(document.ImageData)
+	if !ok {
+		return fmt.Errorf("selected image has invalid data")
+	}
+
+	idata.Rotation = snapToQuarterTurn(idata.Rotation)
+
+	if idata.BaseSize.Width <= 0 || idata.BaseSize.Height <= 0 {
+		idata.BaseSize = el.Bounds.Size
+	}
+
+	newRotation := (idata.Rotation + 90) % 360
+	idata.Rotation = newRotation
+	el.Data = idata
+
+	var desiredW, desiredH document.Unit
+	if newRotation == 90 || newRotation == 270 {
+		desiredW = idata.BaseSize.Height
+		desiredH = idata.BaseSize.Width
+	} else {
+		desiredW = idata.BaseSize.Width
+		desiredH = idata.BaseSize.Height
+	}
+
+	margin := DefaultImageMargin
+	if e.Doc.PageSize.Width <= 2*margin || e.Doc.PageSize.Height <= 2*margin {
+		margin = 0
+	}
+	maxW := e.Doc.PageSize.Width - 2*margin
+	maxH := e.Doc.PageSize.Height - 2*margin
+	if maxW <= 0 {
+		maxW = e.Doc.PageSize.Width
+	}
+	if maxH <= 0 {
+		maxH = e.Doc.PageSize.Height
+	}
+
+	finalW := desiredW
+	finalH := desiredH
+	if finalW > maxW || finalH > maxH {
+		scaleW := float64(maxW) / float64(finalW)
+		scaleH := float64(maxH) / float64(finalH)
+		s := scaleW
+		if scaleH < s {
+			s = scaleH
+		}
+		finalW = document.Unit(float64(finalW) * s)
+		finalH = document.Unit(float64(finalH) * s)
+		if finalW <= 0 {
+			finalW = 1
+		}
+		if finalH <= 0 {
+			finalH = 1
+		}
+	}
+
+	cx := el.Bounds.Position.X + el.Bounds.Size.Width/2
+	cy := el.Bounds.Position.Y + el.Bounds.Size.Height/2
+
+	newX := cx - finalW/2
+	newY := cy - finalH/2
+
+	if newX < 0 {
+		newX = 0
+	}
+	if newY < 0 {
+		newY = 0
+	}
+	if newX+finalW > e.Doc.PageSize.Width {
+		newX = e.Doc.PageSize.Width - finalW
+	}
+	if newY+finalH > e.Doc.PageSize.Height {
+		newY = e.Doc.PageSize.Height - finalH
+	}
+	if newX < 0 {
+		newX = 0
+	}
+	if newY < 0 {
+		newY = 0
+	}
+
+	el.Bounds.Size.Width = finalW
+	el.Bounds.Size.Height = finalH
+	el.Bounds.Position.X = newX
+	el.Bounds.Position.Y = newY
+	return nil
+}
+
 func (e *Editor) DeleteSelected() {
 	if e.SelID == "" {
 		return

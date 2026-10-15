@@ -139,6 +139,71 @@ func TestImageRenderingPreservesAspectRatio(t *testing.T) {
 	}
 }
 
+// TestImageRenderingAppliesRotation verifies that the print rasterizer
+// honours ImageData.Rotation. The source is a landscape 4:1 image whose
+// left half is black and right half is white. With rotation 0 the black
+// half fills the left of the contained area; with rotation 90 the black
+// half must appear at the top.
+func TestImageRenderingAppliesRotation(t *testing.T) {
+	r := &Renderer{}
+	doc := document.New("test", "test", document.Size{Width: 40_000, Height: 40_000})
+
+	src := image.NewGray(image.Rect(0, 0, 4, 1))
+	src.Pix[0] = 0
+	src.Pix[1] = 0
+	src.Pix[2] = 255
+	src.Pix[3] = 255
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, src); err != nil {
+		t.Fatal(err)
+	}
+
+	doc.Elements = []document.Element{document.NewImageElement(
+		"img0", buf.Bytes(), "image/png",
+		document.Rect{Size: document.Size{Width: 20_000, Height: 20_000}},
+	)}
+	ras0, err := r.Render(context.Background(), doc, render.Target{DPI: 254})
+	if err != nil {
+		t.Fatalf("Render rotation=0 error = %v", err)
+	}
+	// Contained rect: 200x50 centred vertically. Left half black.
+	if ras0.Pixels[100*ras0.Width+40] != 0 {
+		t.Errorf("rotation=0 left half expected black, got %d",
+			ras0.Pixels[100*ras0.Width+40])
+	}
+	if ras0.Pixels[100*ras0.Width+160] != 255 {
+		t.Errorf("rotation=0 right half expected white, got %d",
+			ras0.Pixels[100*ras0.Width+160])
+	}
+
+	rotated := document.ImageData{
+		Data:     buf.Bytes(),
+		MimeType: "image/png",
+		Rotation: 90,
+	}
+	doc.Elements = []document.Element{{
+		ID:      "img90",
+		Type:    document.ImageElement,
+		Bounds:  document.Rect{Size: document.Size{Width: 20_000, Height: 20_000}},
+		Visible: true,
+		Data:    rotated,
+	}}
+	ras90, err := r.Render(context.Background(), doc, render.Target{DPI: 254})
+	if err != nil {
+		t.Fatalf("Render rotation=90 error = %v", err)
+	}
+	// Contained rect now 50x200 centred horizontally. The original black
+	// half becomes the top half of the raster.
+	if ras90.Pixels[40*ras90.Width+100] != 0 {
+		t.Errorf("rotation=90 top expected black, got %d",
+			ras90.Pixels[40*ras90.Width+100])
+	}
+	if ras90.Pixels[160*ras90.Width+100] != 255 {
+		t.Errorf("rotation=90 bottom expected white, got %d",
+			ras90.Pixels[160*ras90.Width+100])
+	}
+}
+
 func TestInvalidImageData(t *testing.T) {
 	r := &Renderer{}
 	doc := document.New("test", "test", document.Size{Width: 80000, Height: 100000})
@@ -213,7 +278,6 @@ func TestInvalidDocument(t *testing.T) {
 	}
 }
 
-// helper functions to match renderer calculations
 func expectedPixels(width, height document.Unit, dpi int) (int, int) {
 	w := float64(width) / 1000.0 / 25.4 * float64(dpi)
 	h := float64(height) / 1000.0 / 25.4 * float64(dpi)

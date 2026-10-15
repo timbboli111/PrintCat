@@ -17,6 +17,7 @@ import (
 	"golang.org/x/image/math/fixed"
 
 	"github.com/timboli111/PrintCat/internal/document"
+	"github.com/timboli111/PrintCat/internal/imageutil"
 	"github.com/timboli111/PrintCat/internal/render"
 )
 
@@ -179,6 +180,13 @@ func (r *Renderer) renderImage(img *image.Gray, dpi int, bounds document.Rect, i
 		return
 	}
 
+	// Apply the metadata rotation. This is the same transform the Fyne
+	// preview applies, so the print rasterizer emits the same orientation
+	// the user sees in the editor. Corrupted metadata is not silently
+	// rounded here: imageutil.Rotate returns the source unchanged for
+	// anything that is not exactly 0/90/180/270.
+	src = imageutil.Rotate(src, idata.Rotation)
+
 	pxMinX := int(float64(bounds.Position.X) / 1000.0 / 25.4 * float64(dpi))
 	pxMinY := int(float64(bounds.Position.Y) / 1000.0 / 25.4 * float64(dpi))
 	pxMaxX := int(float64(bounds.Position.X+bounds.Size.Width) / 1000.0 / 25.4 * float64(dpi))
@@ -195,10 +203,6 @@ func (r *Renderer) renderImage(img *image.Gray, dpi int, bounds document.Rect, i
 	draw.ApproxBiLinear.Scale(img, dstRect, src, src.Bounds(), draw.Src, nil)
 }
 
-// containedRect returns the largest rectangle inside dst with src's aspect
-// ratio. Image elements describe their allocated document area; preserving the
-// source ratio here prevents protocol output from stretching imported labels
-// when a document is created by a source other than the editor.
 func containedRect(dst, src image.Rectangle) image.Rectangle {
 	dstWidth, dstHeight := dst.Dx(), dst.Dy()
 	srcWidth, srcHeight := src.Dx(), src.Dy()
