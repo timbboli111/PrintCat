@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"github.com/timboli111/PrintCat/internal/bridge"
+	"github.com/timboli111/PrintCat/internal/printer"
 )
 
 //export Java_com_printcat_app_PrintCatPrintService_nativeProbe
@@ -61,8 +62,8 @@ func Java_com_printcat_app_PrintCatPrintService_nativeEnsureBridgeInitialized(
 		log.Printf("[PrintCatBridge][go] nativeEnsureBridgeInitialized: no active printer configured")
 		return C.jint(-2)
 	}
-	log.Printf("[PrintCatBridge][go] nativeEnsureBridgeInitialized: active printer=%q protocol=%s transport=%s paper=%dx%dmm printable=%dum",
-		active.Name, active.Connection.Protocol, active.Connection.Transport,
+	log.Printf("[PrintCatBridge][go] nativeEnsureBridgeInitialized: configured protocol=%s transport=%s paper=%dx%dmm printable=%dum",
+		active.Connection.Protocol, active.Connection.Transport,
 		state.ActivePaperWidthMm(), state.ActivePaperHeightMm(),
 		int64(active.Profile.MediaWidth))
 	return C.jint(0)
@@ -140,8 +141,18 @@ func Java_com_printcat_app_PrintCatPrintService_nativeSubmitJob(
 	heightsUm C.jintArray,
 	dpi C.jint,
 	printerIDLocal C.jstring,
+	jobIDLocal C.jstring,
 ) C.jint {
-	log.Printf("[PrintCatBridge][go] nativeSubmitJob reached: dpi=%d", int32(dpi))
+	jobID := ""
+	if unsafe.Pointer(jobIDLocal) != nil {
+		cid := C.printcat_jni_string_to_c(env, unsafe.Pointer(jobIDLocal))
+		if cid != nil {
+			jobID = C.GoString(cid)
+			C.free(unsafe.Pointer(cid))
+		}
+	}
+	log.Printf("[PrintCatBridge][go] nativeSubmitJob reached: job_id=%q source=%q dpi=%d",
+		jobID, printer.SourceAndroidPrintFramework, int32(dpi))
 
 	state := bridge.GetGlobal()
 	if state == nil {
@@ -153,8 +164,8 @@ func Java_com_printcat_app_PrintCatPrintService_nativeSubmitJob(
 		log.Printf("[PrintCatBridge][go] nativeSubmitJob: no active printer configured")
 		return C.jint(-2)
 	}
-	log.Printf("[PrintCatBridge][go] nativeSubmitJob: active printer=%s protocol=%s transport=%s endpoint=%s",
-		active.Name, active.Connection.Protocol, active.Connection.Transport, active.Connection.Endpoint)
+	log.Printf("[PrintCatBridge][go] nativeSubmitJob: configured protocol=%s transport=%s",
+		active.Connection.Protocol, active.Connection.Transport)
 
 	pagesPngPtr := unsafe.Pointer(pagesPng)
 	widthsUmPtr := unsafe.Pointer(widthsUm)
@@ -247,6 +258,7 @@ func Java_com_printcat_app_PrintCatPrintService_nativeSubmitJob(
 		PageWidthsUm:  widths64,
 		PageHeightsUm: heights64,
 		DPI:           int(int32(dpi)),
+		JobID:         jobID,
 		PrinterID:     printerID,
 	}
 
@@ -258,7 +270,7 @@ func Java_com_printcat_app_PrintCatPrintService_nativeSubmitJob(
 		return C.jint(-12)
 	}
 
-	log.Printf("[PrintCatBridge][go] nativeSubmitJob: submitted %d page(s) for printer %q",
-		nPages, active.Name)
+	log.Printf("[PrintCatBridge][go] nativeSubmitJob: submitted %d page(s) via configured printer",
+		nPages)
 	return C.jint(0)
 }

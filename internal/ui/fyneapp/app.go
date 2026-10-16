@@ -7,6 +7,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"math"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -37,6 +38,11 @@ const appID = "com.printcat.app"
 // the saved printer does not have Density set. Mirrors
 // escpos.defaultBinarizeThreshold.
 const defaultDensity = 160
+
+// maxSmartTrimBottomMarginMm caps a printer's retained blank margin at 10 cm.
+// This keeps the UI value useful for thermal printers while leaving room for
+// unusually large media. document.Unit stores the value in micrometres.
+const maxSmartTrimBottomMarginMm = float64(printer.MaxSmartTrimBottomMarginUm) / 1000
 
 func New() fyne.App {
 	application := app.NewWithID(appID)
@@ -154,6 +160,53 @@ func transportDisplayName(t printer.TransportKind) string {
 		}
 	}
 	return ""
+}
+
+func parseSmartTrimMarginUm(value string) (document.Unit, error) {
+	marginMm, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(marginMm) || math.IsInf(marginMm, 0) {
+		return 0, fmt.Errorf("enter a valid bottom margin in millimetres")
+	}
+	if marginMm < 0 || marginMm > maxSmartTrimBottomMarginMm {
+		return 0, fmt.Errorf("bottom margin must be between 0 and %.0f mm", maxSmartTrimBottomMarginMm)
+	}
+	// Convert millimetres to whole micrometres, rounding to the nearest
+	// micrometre. Zero is reserved for the encoder's safe default, so retain a
+	// positive sub-micrometre input as the smallest representable margin.
+	marginUm := math.Round(marginMm * 1000)
+	if marginMm > 0 && marginUm == 0 {
+		marginUm = 1
+	}
+	return document.Unit(marginUm), nil
+}
+
+func smartTrimMarginText(marginUm document.Unit) string {
+	return strconv.FormatFloat(float64(marginUm)/1000, 'f', 3, 64)
+}
+
+func smartTrimMarginNeedsRepair(marginUm document.Unit) bool {
+	return printer.ValidateSmartTrimBottomMarginUm(marginUm) != nil
+}
+
+// applySettingsSmartTrimMargin keeps the normal Settings behavior for valid
+// profiles, but lets an invalid persisted margin be repaired regardless of
+// protocol or the Smart Trim toggle. It changes only the stored margin.
+func applySettingsSmartTrimMargin(profile *printer.PrinterProfile, smartTrimEnabled bool, protocol printer.Protocol, value string) (bool, error) {
+	if profile == nil {
+		return false, fmt.Errorf("printer profile is required")
+	}
+
+	needsRepair := smartTrimMarginNeedsRepair(profile.SmartTrimBottomMarginUm)
+	if !needsRepair && (!smartTrimEnabled || protocol != printer.ESCPOS) {
+		return false, nil
+	}
+
+	marginUm, err := parseSmartTrimMarginUm(value)
+	if err != nil {
+		return needsRepair, err
+	}
+	profile.SmartTrimBottomMarginUm = marginUm
+	return needsRepair, nil
 }
 
 func NewWindow(application fyne.App) fyne.Window {
@@ -572,6 +625,8 @@ func NewWindow(application fyne.App) fyne.Window {
 
 		var initialName, initialEndpoint string
 		var initialDPI, initialDensity int
+		var initialSmartTrim bool
+		var initialSmartTrimMargin document.Unit
 		var initialProtocol printer.Protocol
 		var initialTransport printer.TransportKind
 		var baseProfile printer.PrinterProfile
@@ -581,6 +636,8 @@ func NewWindow(application fyne.App) fyne.Window {
 			initialEndpoint = sp.Printer.Connection.Endpoint
 			initialDPI = sp.Printer.Profile.DPI
 			initialDensity = sp.Printer.Profile.Density
+			initialSmartTrim = sp.Printer.Profile.SmartTrimEnabled
+			initialSmartTrimMargin = sp.Printer.Profile.SmartTrimBottomMarginUm
 			initialProtocol = sp.Printer.Connection.Protocol
 			initialTransport = sp.Printer.Connection.Transport
 			baseProfile = sp.Printer.Profile
@@ -612,6 +669,8 @@ func NewWindow(application fyne.App) fyne.Window {
 		endpointEntry := widget.NewEntry()
 		dpiEntry := widget.NewEntry()
 		densityEntry := widget.NewEntry()
+		smartTrimCheck := widget.NewCheck("Enable Smart Trim (ESC/POS only)", nil)
+		smartTrimMarginEntry := widget.NewEntry()
 		paperWidthEntry := widget.NewEntry()
 		paperHeightEntry := widget.NewEntry()
 		printableWidthEntry := widget.NewEntry()
@@ -627,6 +686,24 @@ func NewWindow(application fyne.App) fyne.Window {
 		} else {
 			densityEntry.SetText(strconv.Itoa(defaultDensity))
 		}
+		smartTrimCheck.SetChecked(initialSmartTrim)
+		smartTrimMarginEntry.SetText(smartTrimMarginText(initialSmartTrimMargin))
+		updateSmartTrimControls := func() {
+			if printerProtocols[protocolSelect.Selected] != printer.ESCPOS {
+				smartTrimCheck.Disable()
+				smartTrimMarginEntry.Disable()
+				return
+			}
+			smartTrimCheck.Enable()
+			if smartTrimCheck.Checked {
+				smartTrimMarginEntry.Enable()
+			} else {
+				smartTrimMarginEntry.Disable()
+			}
+		}
+		smartTrimCheck.OnChanged = func(bool) { updateSmartTrimControls() }
+		protocolSelect.OnChanged = func(string) { updateSmartTrimControls() }
+		updateSmartTrimControls()
 		if sp != nil && sp.PaperWidthMm > 0 {
 			paperWidthEntry.SetText(strconv.Itoa(sp.PaperWidthMm))
 		} else {
@@ -646,7 +723,19 @@ func NewWindow(application fyne.App) fyne.Window {
 			title = "Configure Printer"
 		}
 		configWindow := application.NewWindow(title)
-		configWindow.Resize(fyne.NewSize(420, 680))
+		if runtime.GOOS == "android" {
+			configWidth, configHeight := float32(360), float32(560)
+			available := window.Canvas().Size()
+			if available.Width > 16 {
+				configWidth = min(configWidth, available.Width-16)
+			}
+			if available.Height > 16 {
+				configHeight = min(configHeight, available.Height-16)
+			}
+			configWindow.Resize(fyne.NewSize(configWidth, configHeight))
+		} else {
+			configWindow.Resize(fyne.NewSize(460, 700))
+		}
 
 		applyButton := widget.NewButton("Apply", func() {
 			errorLabel.SetText("")
@@ -716,6 +805,15 @@ func NewWindow(application fyne.App) fyne.Window {
 			profile := baseProfile
 			profile.DPI = dpi
 			profile.Density = density
+			profile.SmartTrimEnabled = smartTrimCheck.Checked
+			if profile.SmartTrimEnabled && selectedProtocol == printer.ESCPOS {
+				marginUm, marginErr := parseSmartTrimMarginUm(smartTrimMarginEntry.Text)
+				if marginErr != nil {
+					errorLabel.SetText(marginErr.Error())
+					return
+				}
+				profile.SmartTrimBottomMarginUm = marginUm
+			}
 			if printableWidth > 0 {
 				profile.MediaWidth = document.Unit(printableWidth) * 1000
 			} else {
@@ -770,6 +868,9 @@ func NewWindow(application fyne.App) fyne.Window {
 			dpiEntry,
 			widget.NewLabelWithStyle("Density (1-254):", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			densityEntry,
+			smartTrimCheck,
+			widget.NewLabel("Retained bottom margin in mm (0 uses the 2.5 mm safe default)."),
+			smartTrimMarginEntry,
 			widget.NewLabelWithStyle("Paper width (mm):", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			paperWidthEntry,
 			widget.NewLabelWithStyle("Paper height (mm):", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -855,6 +956,12 @@ func NewWindow(application fyne.App) fyne.Window {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
+			ctx = printer.WithJobDiagnostics(ctx, printer.JobDiagnostics{
+				JobID:     printer.NewDiagnosticJobID("editor"),
+				Source:    printer.SourceInternalEditor,
+				Page:      1,
+				PageCount: 1,
+			})
 
 			if printerCopy.Connection.Transport == printer.BluetoothClassic {
 				granted, err := platform.EnsureBluetoothConnectPermission(ctx)
@@ -1282,6 +1389,8 @@ func NewWindow(application fyne.App) fyne.Window {
 		transportSelect := widget.NewSelect(printerTransportOptions, nil)
 		dpiEntry := widget.NewEntry()
 		densityEntry := widget.NewEntry()
+		smartTrimCheck := widget.NewCheck("Enable Smart Trim (ESC/POS only)", nil)
+		smartTrimMarginEntry := widget.NewEntry()
 		paperWidthEntry := widget.NewEntry()
 		paperHeightEntry := widget.NewEntry()
 		printableWidthEntry := widget.NewEntry()
@@ -1306,6 +1415,8 @@ func NewWindow(application fyne.App) fyne.Window {
 			} else {
 				densityEntry.SetText(strconv.Itoa(defaultDensity))
 			}
+			smartTrimCheck.SetChecked(activeCopy.Printer.Profile.SmartTrimEnabled)
+			smartTrimMarginEntry.SetText(smartTrimMarginText(activeCopy.Printer.Profile.SmartTrimBottomMarginUm))
 			if activeCopy.PaperWidthMm > 0 {
 				paperWidthEntry.SetText(strconv.Itoa(activeCopy.PaperWidthMm))
 			} else {
@@ -1326,10 +1437,38 @@ func NewWindow(application fyne.App) fyne.Window {
 			transportSelect.SetSelected("Bluetooth Classic")
 			dpiEntry.SetText("203")
 			densityEntry.SetText(strconv.Itoa(defaultDensity))
+			smartTrimCheck.SetChecked(false)
+			smartTrimMarginEntry.SetText("0")
 			paperWidthEntry.SetText("80")
 			paperHeightEntry.SetText("200")
 			printableWidthEntry.SetText("")
 		}
+		marginNeedsRepair := active != nil && smartTrimMarginNeedsRepair(active.Printer.Profile.SmartTrimBottomMarginUm)
+
+		updateSmartTrimControls := func() {
+			if marginNeedsRepair {
+				// Keep the feature toggle untouched and expose only the invalid
+				// stored value for recovery, even for non-ESC/POS printers.
+				smartTrimCheck.Disable()
+				smartTrimMarginEntry.Enable()
+				statusLabel.SetText("Saved margin is invalid. Enter a value from 0 to 100 mm and save to restore printing.")
+				return
+			}
+			if printerProtocols[protocolSelect.Selected] != printer.ESCPOS {
+				smartTrimCheck.Disable()
+				smartTrimMarginEntry.Disable()
+				return
+			}
+			smartTrimCheck.Enable()
+			if smartTrimCheck.Checked {
+				smartTrimMarginEntry.Enable()
+			} else {
+				smartTrimMarginEntry.Disable()
+			}
+		}
+		smartTrimCheck.OnChanged = func(bool) { updateSmartTrimControls() }
+		protocolSelect.OnChanged = func(string) { updateSmartTrimControls() }
+		updateSmartTrimControls()
 
 		saveButton := widget.NewButton("Save", func() {
 			statusLabel.SetText("")
@@ -1386,11 +1525,22 @@ func NewWindow(application fyne.App) fyne.Window {
 				statusLabel.SetText("Printable width cannot exceed paper width")
 				return
 			}
+			wasInvalidMargin, marginErr := applySettingsSmartTrimMargin(
+				&ap.Printer.Profile,
+				smartTrimCheck.Checked,
+				selectedProtocol,
+				smartTrimMarginEntry.Text,
+			)
+			if marginErr != nil {
+				statusLabel.SetText(marginErr.Error())
+				return
+			}
 
 			ap.Printer.Connection.Protocol = selectedProtocol
 			ap.Printer.Connection.Transport = selectedTransport
 			ap.Printer.Profile.DPI = dpi
 			ap.Printer.Profile.Density = density
+			ap.Printer.Profile.SmartTrimEnabled = smartTrimCheck.Checked
 			if printableWidth > 0 {
 				ap.Printer.Profile.MediaWidth = document.Unit(printableWidth) * 1000
 			} else {
@@ -1415,6 +1565,10 @@ func NewWindow(application fyne.App) fyne.Window {
 			reloadSavedPrintersUI(currentCopy)
 			updateConfiguredStatusUI()
 			statusLabel.SetText("Saved")
+			if wasInvalidMargin {
+				marginNeedsRepair = false
+				updateSmartTrimControls()
+			}
 		})
 
 		header := container.NewHBox(
@@ -1436,6 +1590,9 @@ func NewWindow(application fyne.App) fyne.Window {
 			dpiEntry,
 			widget.NewLabelWithStyle("Density (1-254, ESC/POS only)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			densityEntry,
+			smartTrimCheck,
+			widget.NewLabel("Retained bottom margin in mm (0 uses the 2.5 mm safe default)."),
+			smartTrimMarginEntry,
 			widget.NewSeparator(),
 			widget.NewLabelWithStyle("Paper", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			container.NewHBox(widget.NewLabel("Width (mm)"), paperWidthEntry),

@@ -3,21 +3,101 @@ package printer_test
 import (
 	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/png"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/timboli111/PrintCat/internal/config"
 	"github.com/timboli111/PrintCat/internal/document"
 	"github.com/timboli111/PrintCat/internal/printer"
 	"github.com/timboli111/PrintCat/internal/printer/cpcl"
 	"github.com/timboli111/PrintCat/internal/printer/epl"
+	"github.com/timboli111/PrintCat/internal/printer/escpos"
 	"github.com/timboli111/PrintCat/internal/printer/starprnt"
 	"github.com/timboli111/PrintCat/internal/printer/transport/tcp"
 	"github.com/timboli111/PrintCat/internal/printer/tspl"
 	"github.com/timboli111/PrintCat/internal/printer/zpl"
 	"github.com/timboli111/PrintCat/internal/render/basic"
 )
+
+func TestEditorPrintUsesSmartTrimFromSavedPrinterProfile(t *testing.T) {
+	profile := printer.PrinterProfile{
+		DPI:                     254,
+		SmartTrimEnabled:        true,
+		SmartTrimBottomMarginUm: 100,
+	}
+	cfg := config.Default()
+	cfg.SavedPrinters = []config.SavedPrinter{{
+		Printer: printer.Printer{
+			ID:         "editor-trim-printer",
+			Name:       "Editor trim printer",
+			Connection: printer.Connection{Protocol: printer.ESCPOS, Transport: printer.TCP, Endpoint: "memory"},
+			Profile:    profile,
+		},
+	}}
+	cfg.ActivePrinterID = "editor-trim-printer"
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := loaded.ActiveSavedPrinter()
+	if active == nil {
+		t.Fatal("active saved printer was not loaded")
+	}
+
+	img := image.NewGray(image.Rect(0, 0, 8, 10))
+	for i := range img.Pix {
+		img.Pix[i] = 255
+	}
+	img.SetGray(1, 2, color.Gray{Y: 0})
+	img.SetGray(2, 2, color.Gray{Y: 0})
+	var imageData bytes.Buffer
+	if err := png.Encode(&imageData, img); err != nil {
+		t.Fatal(err)
+	}
+	doc := document.New("editor-doc", "Editor document", document.Size{Width: 800, Height: 1000})
+	doc.Elements = append(doc.Elements, document.NewImageElement("content", imageData.Bytes(), "image/png", document.Rect{
+		Size: doc.PageSize,
+	}))
+
+	service := printer.NewService()
+	if err := service.RegisterBackend(&escpos.Encoder{}); err != nil {
+		t.Fatal(err)
+	}
+	transport := &printer.MemoryTransport{TransportKind: printer.TCP}
+	if err := service.RegisterTransport(transport); err != nil {
+		t.Fatal(err)
+	}
+	ctx := printer.WithJobDiagnostics(context.Background(), printer.JobDiagnostics{
+		JobID: "editor-smart-trim", Source: printer.SourceInternalEditor,
+	})
+	if err := service.Print(ctx, active.Printer, doc, &basic.Renderer{}); err != nil {
+		t.Fatalf("editor Service.Print: %v", err)
+	}
+	if len(transport.Payloads) != 1 {
+		t.Fatalf("payload count=%d, want 1", len(transport.Payloads))
+	}
+	metrics := printer.AnalyzePayload(printer.ESCPOS, transport.Payloads[0])
+	if !metrics.HasRasterHeader || metrics.RasterHeightDots != 4 {
+		t.Fatalf("editor raster header=%+v, want 1-byte width and 4-dot trimmed height", metrics)
+	}
+	if metrics.RasterDataIncomplete || metrics.TrailingBytesAfterRaster != 0 ||
+		metrics.BytesAfterRasterHeader != metrics.RasterBytesDeclared {
+		t.Fatalf("editor raster payload/header mismatch: %+v", metrics)
+	}
+	if got := transport.JobDiagnostics[0].Source; got != printer.SourceInternalEditor {
+		t.Fatalf("transport source=%q, want %q", got, printer.SourceInternalEditor)
+	}
+}
 
 func TestIntegrationTSPLOverTCP(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

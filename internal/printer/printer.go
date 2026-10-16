@@ -3,6 +3,7 @@ package printer
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/timboli111/PrintCat/internal/document"
 	"github.com/timboli111/PrintCat/internal/render"
@@ -126,6 +127,22 @@ func (s *Service) RegisterTransport(transport Transport) error {
 }
 
 func (s *Service) Print(ctx context.Context, profile Printer, doc document.Document, renderer render.Renderer) error {
+	info := JobDiagnosticsFromContext(ctx)
+	if info.JobID == "" {
+		info.JobID = NewDiagnosticJobID("print")
+	}
+	if info.Source == "" {
+		info.Source = "unspecified"
+	}
+	if info.Page <= 0 {
+		info.Page = 1
+	}
+	if info.PageCount <= 0 {
+		info.PageCount = 1
+	}
+	info.Protocol = profile.Connection.Protocol
+	ctx = WithJobDiagnostics(ctx, info)
+
 	if err := profile.Validate(); err != nil {
 		return fmt.Errorf("invalid printer: %w", err)
 	}
@@ -147,6 +164,13 @@ func (s *Service) Print(ctx context.Context, profile Printer, doc document.Docum
 	if len(payload) == 0 {
 		return fmt.Errorf("encode %s: empty payload", backend.Protocol())
 	}
+	metrics := AnalyzePayload(backend.Protocol(), payload)
+	log.Printf("[PrintCatPrintDiag] job_id=%q source=%q page=%d/%d protocol=%q transport=%q payload_bytes=%d sha256=%s raster_header=%t raster_width_bytes=%d raster_width_dots_padded=%d raster_height_dots=%d raster_bytes_declared=%d bytes_after_raster_header=%d trailing_bytes_after_raster=%d raster_data_incomplete=%t raster_header_hex=%q",
+		info.JobID, info.Source, info.Page, info.PageCount, backend.Protocol(), transport.Kind(),
+		metrics.PayloadBytes, metrics.SHA256, metrics.HasRasterHeader, metrics.RasterWidthBytes,
+		metrics.RasterWidthDotsPadded, metrics.RasterHeightDots, metrics.RasterBytesDeclared,
+		metrics.BytesAfterRasterHeader, metrics.TrailingBytesAfterRaster, metrics.RasterDataIncomplete,
+		metrics.RasterHeaderHex)
 	if err := transport.Send(ctx, profile.Connection.Endpoint, payload, profile.Connection.Options); err != nil {
 		return fmt.Errorf("send via %s: %w", transport.Kind(), err)
 	}

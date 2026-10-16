@@ -139,6 +139,9 @@ func TestMigrationFromLegacySinglePrinter(t *testing.T) {
 	if sp.Printer.ID != "DC:0D:51:9F:73:CE" {
 		t.Errorf("migrated ID = %q", sp.Printer.ID)
 	}
+	if sp.Printer.Profile.SmartTrimEnabled || sp.Printer.Profile.SmartTrimBottomMarginUm != 0 {
+		t.Errorf("legacy config should default Smart Trim off with default margin: %+v", sp.Printer.Profile)
+	}
 	if sp.PaperWidthMm != 58 || sp.PaperHeightMm != 120 {
 		t.Errorf("migrated paper = %dx%d, want 58x120",
 			sp.PaperWidthMm, sp.PaperHeightMm)
@@ -157,6 +160,59 @@ func TestMigrationFromLegacySinglePrinter(t *testing.T) {
 	}
 	if len(reloaded.SavedPrinters) != 1 {
 		t.Errorf("after re-save, SavedPrinters = %d, want 1", len(reloaded.SavedPrinters))
+	}
+}
+
+func TestSmartTrimProfileSettingsRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Default()
+	cfg.SavedPrinters = []SavedPrinter{{
+		Printer: printer.Printer{
+			ID:      "trim-printer",
+			Profile: printer.PrinterProfile{DPI: 203, SmartTrimEnabled: true, SmartTrimBottomMarginUm: 3000},
+		},
+	}}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := got.SavedPrinters[0].Printer.Profile
+	if !profile.SmartTrimEnabled || profile.SmartTrimBottomMarginUm != 3000 {
+		t.Fatalf("Smart Trim settings after round trip = enabled:%t margin:%d, want enabled and 3000 um", profile.SmartTrimEnabled, profile.SmartTrimBottomMarginUm)
+	}
+}
+
+func TestLoadPreservesOutOfRangeSmartTrimForExplicitValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Default()
+	cfg.SavedPrinters = []SavedPrinter{{
+		Printer: printer.Printer{
+			ID: "legacy-trim-printer",
+			Profile: printer.PrinterProfile{
+				DPI:                     203,
+				SmartTrimEnabled:        true,
+				SmartTrimBottomMarginUm: printer.MaxSmartTrimBottomMarginUm + 1,
+			},
+		},
+	}}
+	cfg.ActivePrinterID = "legacy-trim-printer"
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := loaded.SavedPrinters[0].Printer.Profile
+	if profile.SmartTrimBottomMarginUm != printer.MaxSmartTrimBottomMarginUm+1 {
+		t.Fatalf("Load silently changed saved margin to %d µm", profile.SmartTrimBottomMarginUm)
+	}
+	if err := loaded.SavedPrinters[0].Printer.Validate(); err == nil {
+		t.Fatal("out-of-range saved profile passed printer validation")
 	}
 }
 

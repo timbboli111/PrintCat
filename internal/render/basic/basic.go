@@ -66,7 +66,7 @@ func (r *Renderer) Render(ctx context.Context, doc document.Document, target ren
 			if !ok {
 				continue
 			}
-			r.renderImage(img, target.DPI, el.Bounds, idata)
+			r.renderImage(img, target.DPI, el.Bounds, idata, target.CompositeAlphaOnWhite)
 		default:
 			continue
 		}
@@ -161,7 +161,7 @@ func (r *Renderer) renderText(img *image.Gray, dpi int, bounds document.Rect, td
 	d.DrawString(td.Content)
 }
 
-func (r *Renderer) renderImage(img *image.Gray, dpi int, bounds document.Rect, idata document.ImageData) {
+func (r *Renderer) renderImage(img *image.Gray, dpi int, bounds document.Rect, idata document.ImageData, compositeAlphaOnWhite bool) {
 	src, _, err := image.Decode(bytes.NewReader(idata.Data))
 	if err != nil {
 		pxMinX := int(float64(bounds.Position.X) / 1000.0 / 25.4 * float64(dpi))
@@ -200,7 +200,11 @@ func (r *Renderer) renderImage(img *image.Gray, dpi int, bounds document.Rect, i
 	pxMaxY = min(pxMaxY, img.Bounds().Dy())
 	dstRect := image.Rect(pxMinX, pxMinY, pxMaxX, pxMaxY)
 	dstRect = containedRect(dstRect, src.Bounds())
-	draw.ApproxBiLinear.Scale(img, dstRect, src, src.Bounds(), draw.Src, nil)
+	op := draw.Src
+	if compositeAlphaOnWhite {
+		op = draw.Over
+	}
+	draw.ApproxBiLinear.Scale(img, dstRect, src, src.Bounds(), op, nil)
 }
 
 func containedRect(dst, src image.Rectangle) image.Rectangle {

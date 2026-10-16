@@ -60,7 +60,8 @@ public final class PrintCatPrintService extends PrintService {
             int[] widthsUm,
             int[] heightsUm,
             int dpi,
-            String printerIDLocal);
+            String printerIDLocal,
+            String jobId);
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -185,7 +186,7 @@ public final class PrintCatPrintService extends PrintService {
         worker.execute(new Runnable() {
             @Override
             public void run() {
-                runSubmitWorker(context, pfd, attrs, localId, completion);
+                runSubmitWorker(context, pfd, attrs, localId, jobId, completion);
             }
         });
     }
@@ -269,6 +270,7 @@ public final class PrintCatPrintService extends PrintService {
                                  final ParcelFileDescriptor pfd,
                                  final PrintAttributes attrs,
                                  final String localId,
+                                 final String jobId,
                                  final PrintCompletion completion) {
         int rc;
         String failReason = null;
@@ -285,13 +287,14 @@ public final class PrintCatPrintService extends PrintService {
             }
 
             Log.d(TAG, "runSubmitWorker: submitting " + result.pagesPng.length
-                    + " page(s) dpi=" + result.dpi + " localId=" + localId);
+                    + " page(s) dpi=" + result.dpi + " jobId=" + jobId);
             rc = nativeSubmitJob(
                     result.pagesPng,
                     result.widthsUm,
                     result.heightsUm,
                     result.dpi,
-                    localId);
+                    localId,
+                    jobId);
             if (rc != 0) {
                 failReason = "nativeSubmitJob returned rc=" + rc;
                 Log.e(TAG, "runSubmitWorker: " + failReason);

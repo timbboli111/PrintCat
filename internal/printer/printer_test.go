@@ -45,6 +45,23 @@ func TestProtocolCanUseMultipleTransports(t *testing.T) {
 }
 
 func TestProfileValidate(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		margin  document.Unit
+		wantErr bool
+	}{
+		{name: "zero selects default"},
+		{name: "maximum inclusive", margin: MaxSmartTrimBottomMarginUm},
+		{name: "negative", margin: -1, wantErr: true},
+		{name: "above maximum", margin: MaxSmartTrimBottomMarginUm + 1, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			profile := PrinterProfile{DPI: 203, SmartTrimEnabled: true, SmartTrimBottomMarginUm: tt.margin}
+			if err := profile.Validate(); (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
 	valid := PrinterProfile{DPI: 203}
 	if err := valid.Validate(); err != nil {
 		t.Errorf("valid profile should pass, got %v", err)
@@ -129,5 +146,16 @@ func TestServicePrintValidation(t *testing.T) {
 	err := service.Print(context.Background(), p, doc, nil)
 	if err == nil {
 		t.Error("Print should fail due to invalid DPI")
+	}
+
+	invalidTrimMargin := Printer{
+		Connection: Connection{Protocol: ZPL, Transport: USB},
+		Profile: PrinterProfile{
+			DPI:                     203,
+			SmartTrimBottomMarginUm: MaxSmartTrimBottomMarginUm + 1,
+		},
+	}
+	if err := service.Print(context.Background(), invalidTrimMargin, doc, nil); err == nil {
+		t.Error("Print should fail for an out-of-range Smart Trim margin even when the feature is disabled")
 	}
 }

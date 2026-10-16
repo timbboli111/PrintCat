@@ -3,11 +3,13 @@ package escpos
 import (
 	"context"
 	"fmt"
+	"math/bits"
 	"strconv"
 
 	"github.com/timboli111/PrintCat/internal/document"
 	"github.com/timboli111/PrintCat/internal/printer"
 	"github.com/timboli111/PrintCat/internal/render"
+	"github.com/timboli111/PrintCat/internal/render/trim"
 )
 
 // defaultBinarizeThreshold is used when PrinterProfile.Density is not set
@@ -17,6 +19,9 @@ import (
 // discarding near-white anti-noise. Background is pure white, so the
 // higher threshold does not introduce speckle.
 const defaultBinarizeThreshold = 160
+
+const defaultSmartTrimBottomMarginUm document.Unit = 2500
+const maxRasterHeaderDimension = 1<<16 - 1
 
 type Encoder struct{}
 
@@ -30,6 +35,9 @@ func (e *Encoder) Encode(ctx context.Context, doc document.Document, renderer re
 	}
 	if profile.DPI <= 0 {
 		return nil, fmt.Errorf("invalid DPI: %d", profile.DPI)
+	}
+	if err := printer.ValidateSmartTrimBottomMarginUm(profile.SmartTrimBottomMarginUm); err != nil {
+		return nil, err
 	}
 
 	// Raster binarization threshold. Configurable per printer via
@@ -63,8 +71,9 @@ func (e *Encoder) Encode(ctx context.Context, doc document.Document, renderer re
 	}
 
 	target := render.Target{
-		DPI:        profile.DPI,
-		Monochrome: true,
+		DPI:                   profile.DPI,
+		Monochrome:            true,
+		CompositeAlphaOnWhite: profile.SmartTrimEnabled,
 	}
 	raster, err := renderer.Render(ctx, doc, target)
 	if err != nil {
@@ -74,8 +83,23 @@ func (e *Encoder) Encode(ctx context.Context, doc document.Document, renderer re
 	if raster.Width != docWidthDots || raster.Height != docHeightDots {
 		return nil, fmt.Errorf("raster dimensions mismatch: expected %dx%d, got %dx%d", docWidthDots, docHeightDots, raster.Width, raster.Height)
 	}
-	if len(raster.Pixels) != raster.Width*raster.Height {
-		return nil, fmt.Errorf("raster pixel length mismatch: expected %d, got %d", raster.Width*raster.Height, len(raster.Pixels))
+	rasterPixelCount, ok := checkedProduct(raster.Width, raster.Height)
+	if !ok {
+		return nil, fmt.Errorf("raster dimensions overflow: %dx%d", raster.Width, raster.Height)
+	}
+	if len(raster.Pixels) != rasterPixelCount {
+		return nil, fmt.Errorf("raster pixel length mismatch: expected %d, got %d", rasterPixelCount, len(raster.Pixels))
+	}
+
+	if profile.SmartTrimEnabled {
+		marginRows, err := smartTrimMarginRows(profile.SmartTrimBottomMarginUm, profile.DPI, raster.Height)
+		if err != nil {
+			return nil, err
+		}
+		raster, _, err = trim.Bottom(raster, threshold, marginRows)
+		if err != nil {
+			return nil, fmt.Errorf("smart trim failed: %w", err)
+		}
 	}
 
 	outWidthDots := docWidthDots
@@ -83,9 +107,19 @@ func (e *Encoder) Encode(ctx context.Context, doc document.Document, renderer re
 		outWidthDots = mediaWidthDots
 	}
 
-	widthBytes := (outWidthDots + 7) / 8
-	packed := make([]byte, widthBytes*docHeightDots)
-	for y := 0; y < docHeightDots; y++ {
+	widthBytes := outWidthDots / 8
+	if outWidthDots%8 != 0 {
+		widthBytes++
+	}
+	if widthBytes > maxRasterHeaderDimension || raster.Height > maxRasterHeaderDimension {
+		return nil, fmt.Errorf("raster dimensions exceed ESC/POS header limits: %d bytes wide by %d dots high", widthBytes, raster.Height)
+	}
+	packedLength, ok := checkedProduct(widthBytes, raster.Height)
+	if !ok {
+		return nil, fmt.Errorf("packed raster dimensions overflow: %dx%d bytes", widthBytes, raster.Height)
+	}
+	packed := make([]byte, packedLength)
+	for y := 0; y < raster.Height; y++ {
 		for x := 0; x < outWidthDots; x++ {
 			srcIdx := y*docWidthDots + x
 			bit := 0
@@ -105,8 +139,8 @@ func (e *Encoder) Encode(ctx context.Context, doc document.Document, renderer re
 
 	xL := byte(widthBytes & 0xFF)
 	xH := byte((widthBytes >> 8) & 0xFF)
-	yL := byte(docHeightDots & 0xFF)
-	yH := byte((docHeightDots >> 8) & 0xFF)
+	yL := byte(raster.Height & 0xFF)
+	yH := byte((raster.Height >> 8) & 0xFF)
 	cmd = append(cmd, 0x1D, 0x76, 0x30, 0x00, xL, xH, yL, yH)
 	cmd = append(cmd, packed...)
 
@@ -125,4 +159,40 @@ func (e *Encoder) Encode(ctx context.Context, doc document.Document, renderer re
 	}
 
 	return cmd, nil
+}
+
+func smartTrimMarginRows(marginUm document.Unit, dpi, rasterHeight int) (int, error) {
+	if err := printer.ValidateSmartTrimBottomMarginUm(marginUm); err != nil {
+		return 0, err
+	}
+	if marginUm == 0 {
+		marginUm = defaultSmartTrimBottomMarginUm
+	}
+
+	// Clamp to the raster height while converting so even very large settings
+	// cannot overflow an intermediate integer or create an oversized margin.
+	hi, lo := bits.Mul64(uint64(marginUm), uint64(dpi))
+	const micrometresPerInch = uint64(25400)
+	if hi >= micrometresPerInch {
+		return rasterHeight, nil
+	}
+	rows, remainder := bits.Div64(hi, lo, micrometresPerInch)
+	if rows >= uint64(rasterHeight) {
+		return rasterHeight, nil
+	}
+	if remainder != 0 {
+		rows++ // Round up so the configured physical safety margin is retained.
+	}
+	if rows >= uint64(rasterHeight) {
+		return rasterHeight, nil
+	}
+	return int(rows), nil
+}
+
+func checkedProduct(a, b int) (int, bool) {
+	maxInt := int(^uint(0) >> 1)
+	if a <= 0 || b <= 0 || a > maxInt/b {
+		return 0, false
+	}
+	return a * b, true
 }

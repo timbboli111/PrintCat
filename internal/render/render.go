@@ -11,6 +11,10 @@ import (
 type Target struct {
 	DPI        int
 	Monochrome bool
+	// CompositeAlphaOnWhite asks renderers with image support to composite
+	// transparent source pixels over their white page background. The default
+	// false preserves existing rasterization behavior.
+	CompositeAlphaOnWhite bool
 }
 
 // Raster is protocol-neutral rendered image data. Pixels are intentionally opaque

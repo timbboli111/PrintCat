@@ -32,6 +32,7 @@ type SubmitRequest struct {
 	PageWidthsUm  []int64
 	PageHeightsUm []int64
 	DPI           int
+	JobID         string
 	// PrinterID is reserved for future multi-printer support. When empty,
 	// the currently configured active printer is used.
 	PrinterID string
@@ -134,6 +135,14 @@ func (s *State) Submit(ctx context.Context, req SubmitRequest) error {
 	if req.DPI <= 0 {
 		return fmt.Errorf("invalid DPI: %d", req.DPI)
 	}
+	jobID := req.JobID
+	if jobID == "" {
+		jobID = printer.NewDiagnosticJobID("android-print")
+	}
+	ctx = printer.WithJobDiagnostics(ctx, printer.JobDiagnostics{
+		JobID: jobID, Source: printer.SourceAndroidPrintFramework,
+		PageCount: len(req.Pages),
+	})
 
 	// Work on a copy so we do not mutate the persisted active printer.
 	target := *p
@@ -171,7 +180,8 @@ func (s *State) Submit(ctx context.Context, req SubmitRequest) error {
 			},
 		))
 
-		if err := s.service.Print(ctx, target, doc, s.renderer); err != nil {
+		pageCtx := printer.WithJobPage(ctx, i+1, len(req.Pages))
+		if err := s.service.Print(pageCtx, target, doc, s.renderer); err != nil {
 			return fmt.Errorf("page %d: %w", i+1, err)
 		}
 	}

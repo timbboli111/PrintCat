@@ -3,6 +3,9 @@ package escpos
 import (
 	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/png"
 	"testing"
 
 	"github.com/timboli111/PrintCat/internal/document"
@@ -80,6 +83,19 @@ func extractRasterWidthBytes(t *testing.T, data []byte) int {
 	}
 	t.Fatal("GS v 0 header not found")
 	return 0
+}
+
+func extractRasterHeader(t *testing.T, data []byte) (offset, widthBytes, height int) {
+	t.Helper()
+	for i := 0; i+7 < len(data); i++ {
+		if data[i] == 0x1D && data[i+1] == 0x76 && data[i+2] == 0x30 {
+			widthBytes = int(data[i+4]) | (int(data[i+5]) << 8)
+			height = int(data[i+6]) | (int(data[i+7]) << 8)
+			return i, widthBytes, height
+		}
+	}
+	t.Fatal("GS v 0 header not found")
+	return 0, 0, 0
 }
 
 func TestMediaWidthCropsRaster(t *testing.T) {
@@ -403,5 +419,215 @@ func TestBitPackingPattern(t *testing.T) {
 	}
 	if data[idx+8] != 0xAA {
 		t.Errorf("bit-packing mismatch: expected 0xAA, got 0x%02x", data[idx+8])
+	}
+}
+
+func TestSmartTrimDisabledPreservesLegacyBytes(t *testing.T) {
+	doc := document.New("test", "Test", document.Size{Width: 800, Height: 400})
+	pixels := bytes.Repeat([]byte{255}, 8*4)
+	pixels[0] = 0
+	data, err := (&Encoder{}).Encode(context.Background(), doc, &mockRenderer{w: 8, h: 4, pix: pixels}, printer.PrinterProfile{DPI: 254}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{
+		0x1B, 0x40,
+		0x1D, 0x76, 0x30, 0x00, 0x01, 0x00, 0x04, 0x00,
+		0x80, 0x00, 0x00, 0x00,
+	}
+	if !bytes.Equal(data, want) {
+		t.Fatalf("disabled Smart Trim changed legacy output:\n got % x\nwant % x", data, want)
+	}
+}
+
+func TestSmartTrimHeaderMatchesPackedRasterLength(t *testing.T) {
+	doc := document.New("test", "Test", document.Size{Width: 800, Height: 1000}) // 8x10 dots at 254 DPI.
+	pixels := bytes.Repeat([]byte{255}, 8*10)
+	pixels[1*8+1] = 0
+	pixels[4*8+2] = 0
+	pixels[4*8+3] = 0
+	profile := printer.PrinterProfile{
+		DPI:                     254,
+		SmartTrimEnabled:        true,
+		SmartTrimBottomMarginUm: 100, // One raster row at 254 DPI.
+	}
+	data, err := (&Encoder{}).Encode(context.Background(), doc, &mockRenderer{w: 8, h: 10, pix: pixels}, profile, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, widthBytes, height := extractRasterHeader(t, data)
+	if widthBytes != 1 || height != 6 {
+		t.Fatalf("header widthBytes=%d height=%d, want 1x6", widthBytes, height)
+	}
+	packedLength := widthBytes * height
+	if got := len(data) - 10; got != packedLength {
+		t.Fatalf("bytes after raster header=%d, header declares %d", got, packedLength)
+	}
+}
+
+func TestSmartTrimUsesSafeDefaultMargin(t *testing.T) {
+	doc := document.New("test", "Test", document.Size{Width: 800, Height: 4000}) // 8x40 dots at 254 DPI.
+	pixels := bytes.Repeat([]byte{255}, 8*40)
+	pixels[1*8+1] = 0
+	pixels[1*8+2] = 0
+	data, err := (&Encoder{}).Encode(context.Background(), doc, &mockRenderer{w: 8, h: 40, pix: pixels}, printer.PrinterProfile{
+		DPI:              254,
+		SmartTrimEnabled: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, height := extractRasterHeader(t, data)
+	if height != 27 { // 2 content rows + ceil(2.5 mm * 254 DPI) = 25 margin rows.
+		t.Fatalf("header height=%d, want 27", height)
+	}
+}
+
+func TestSmartTrimProcessesMultipageContentHeightsIndependently(t *testing.T) {
+	encoder := &Encoder{}
+	profile := printer.PrinterProfile{DPI: 254, SmartTrimEnabled: true, SmartTrimBottomMarginUm: 100}
+	pageCases := []struct {
+		name       string
+		height     int
+		lastInkRow int
+		wantHeight int
+	}{
+		{name: "page one", height: 10, lastInkRow: 1, wantHeight: 3},
+		{name: "page two", height: 12, lastInkRow: 4, wantHeight: 6},
+	}
+	for _, tt := range pageCases {
+		t.Run(tt.name, func(t *testing.T) {
+			pixels := bytes.Repeat([]byte{255}, 8*tt.height)
+			pixels[tt.lastInkRow*8+1] = 0
+			pixels[tt.lastInkRow*8+2] = 0
+			doc := document.New("page", tt.name, document.Size{Width: 800, Height: document.Unit(tt.height * 100)})
+			data, err := encoder.Encode(context.Background(), doc, &mockRenderer{w: 8, h: tt.height, pix: pixels}, profile, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, gotHeight := extractRasterHeader(t, data)
+			if gotHeight != tt.wantHeight {
+				t.Fatalf("header height=%d, want %d", gotHeight, tt.wantHeight)
+			}
+		})
+	}
+}
+
+func TestSmartTrimRejectsMarginsOutsideProfileBounds(t *testing.T) {
+	doc := document.New("test", "Test", document.Size{Width: 800, Height: 400})
+	for _, margin := range []document.Unit{-1, printer.MaxSmartTrimBottomMarginUm + 1} {
+		_, err := (&Encoder{}).Encode(context.Background(), doc, &mockRenderer{w: 8, h: 4, pix: bytes.Repeat([]byte{255}, 8*4)}, printer.PrinterProfile{
+			DPI:                     254,
+			SmartTrimEnabled:        true,
+			SmartTrimBottomMarginUm: margin,
+		}, nil)
+		if err == nil {
+			t.Errorf("Encode accepted out-of-range margin %d µm", margin)
+		}
+	}
+}
+
+func TestSmartTrimAcceptsMaximumMargin(t *testing.T) {
+	rows, err := smartTrimMarginRows(printer.MaxSmartTrimBottomMarginUm, 203, 1000)
+	if err != nil {
+		t.Fatalf("maximum Smart Trim margin was rejected: %v", err)
+	}
+	if rows != 800 {
+		t.Fatalf("100 mm at 203 DPI = %d rows, want 800", rows)
+	}
+}
+
+func TestRasterHeaderDimensionsMustFitUint16(t *testing.T) {
+	const heightDots = 1 << 16
+	doc := document.New("oversized", "Oversized raster", document.Size{
+		Width:  800,
+		Height: document.Unit(heightDots * 100),
+	})
+	_, err := (&Encoder{}).Encode(
+		context.Background(),
+		doc,
+		&mockRenderer{w: 8, h: heightDots, pix: bytes.Repeat([]byte{255}, 8*heightDots)},
+		printer.PrinterProfile{DPI: 254},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected error for raster height exceeding the 16-bit ESC/POS header")
+	}
+}
+
+func TestSmartTrimCompositesTransparentPNGOverWhite(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 8, 12))
+	img.SetNRGBA(1, 2, color.NRGBA{A: 255})
+	img.SetNRGBA(2, 2, color.NRGBA{A: 255})
+	img.SetNRGBA(1, 4, color.NRGBA{A: 255})
+	img.SetNRGBA(2, 4, color.NRGBA{A: 255})
+	var pngData bytes.Buffer
+	if err := png.Encode(&pngData, img); err != nil {
+		t.Fatal(err)
+	}
+	doc := document.New("test", "Transparent PNG", document.Size{Width: 800, Height: 1200})
+	doc.Elements = append(doc.Elements, document.NewImageElement("image", pngData.Bytes(), "image/png", document.Rect{
+		Size: document.Size{Width: doc.PageSize.Width, Height: doc.PageSize.Height},
+	}))
+	renderer := &basic.Renderer{}
+
+	trimmed, err := (&Encoder{}).Encode(context.Background(), doc, renderer, printer.PrinterProfile{
+		DPI:                     254,
+		SmartTrimEnabled:        true,
+		SmartTrimBottomMarginUm: 100,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, height := extractRasterHeader(t, trimmed)
+	if height != 6 {
+		t.Fatalf("transparent PNG trimmed height=%d, want 6", height)
+	}
+
+	legacy, err := (&Encoder{}).Encode(context.Background(), doc, renderer, printer.PrinterProfile{DPI: 254}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, legacyHeight := extractRasterHeader(t, legacy)
+	if legacyHeight != 12 {
+		t.Fatalf("Smart Trim disabled height=%d, want legacy height 12", legacyHeight)
+	}
+}
+
+func TestSmartTrimDoesNotClipSmallTextNearBottom(t *testing.T) {
+	doc := document.New("small-text", "Small text", document.Size{Width: 20_000, Height: 50_000})
+	doc.Elements = append(doc.Elements, document.NewTextElement("small", "i", document.Rect{
+		Position: document.Point{X: 1_000, Y: 42_000},
+		Size:     document.Size{Width: 18_000, Height: 8_000},
+	}, 1_800))
+	renderer := &basic.Renderer{}
+	raster, err := renderer.Render(context.Background(), doc, render.Target{DPI: 254, Monochrome: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastInkRow := -1
+	for y := 0; y < raster.Height; y++ {
+		for x := 0; x < raster.Width; x++ {
+			if raster.Pixels[y*raster.Width+x] < defaultBinarizeThreshold {
+				lastInkRow = y
+				break
+			}
+		}
+	}
+	if lastInkRow < 0 {
+		t.Fatal("small text did not produce printable pixels")
+	}
+
+	data, err := (&Encoder{}).Encode(context.Background(), doc, renderer, printer.PrinterProfile{
+		DPI:                     254,
+		SmartTrimEnabled:        true,
+		SmartTrimBottomMarginUm: 100,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := printer.AnalyzePayload(printer.ESCPOS, data)
+	if !metrics.HasRasterHeader || metrics.RasterHeightDots < lastInkRow+1 {
+		t.Fatalf("Smart Trim clipped small text: last ink row=%d header=%+v", lastInkRow, metrics)
 	}
 }

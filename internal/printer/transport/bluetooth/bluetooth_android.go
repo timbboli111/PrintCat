@@ -5,9 +5,12 @@ package bluetooth
 import (
 	"context"
 	"fmt"
+	"log"
+	"time"
 	"unsafe"
 
 	"fyne.io/fyne/v2/driver"
+	"github.com/timboli111/PrintCat/internal/printer"
 )
 
 /*
@@ -15,7 +18,14 @@ import (
 #include <jni.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <android/log.h>
+
+static double printcat_monotonic_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0.0;
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
 
 // SPP UUID: 00001101-0000-1000-8000-00805F9B34FB
 static const char* SPP_UUID = "00001101-0000-1000-8000-00805F9B34FB";
@@ -60,15 +70,15 @@ static int check_exception(JNIEnv* env, const char* context, char** error_msg) {
 }
 
 // Helper untuk menutup socket dengan aman (best-effort).
-static void close_socket_safe(JNIEnv* env, jobject socket) {
-    if (socket == NULL) return;
+static int close_socket_safe(JNIEnv* env, jobject socket) {
+    if (socket == NULL) return 0;
     jclass socketClass = (*env)->GetObjectClass(env, socket);
     if (socketClass == NULL) {
         // Exception mungkin terjadi; bersihkan dan abaikan.
         if ((*env)->ExceptionCheck(env)) {
             (*env)->ExceptionClear(env);
         }
-        return;
+        return -1;
     }
     jmethodID close = (*env)->GetMethodID(env, socketClass, "close", "()V");
     if (close == NULL) {
@@ -76,13 +86,28 @@ static void close_socket_safe(JNIEnv* env, jobject socket) {
         if ((*env)->ExceptionCheck(env)) {
             (*env)->ExceptionClear(env);
         }
-        return;
+        return -1;
     }
     (*env)->CallVoidMethod(env, socket, close);
     if ((*env)->ExceptionCheck(env)) {
         (*env)->ExceptionClear(env);
+        (*env)->DeleteLocalRef(env, socketClass);
+        return -1;
     }
     (*env)->DeleteLocalRef(env, socketClass);
+    return 1;
+}
+
+static void close_socket_diagnostic(JNIEnv* env, jobject socket,
+                                    const char* job_id, const char* source) {
+    double started_ms = printcat_monotonic_ms();
+    int close_status = close_socket_safe(env, socket);
+    double elapsed_ms = printcat_monotonic_ms() - started_ms;
+    __android_log_print(ANDROID_LOG_DEBUG, "PrintCatBt",
+                        "job=%s source=%s stage=close status=%s duration_ms=%.3f",
+                        job_id, source,
+                        close_status > 0 ? "ok" : (close_status == 0 ? "skipped" : "error"),
+                        elapsed_ms);
 }
 
 // Fungsi utama untuk mengirim data via Bluetooth Classic RFCOMM/SPP.
@@ -92,6 +117,8 @@ static int bluetooth_send(
     JNIEnv* env,
     jobject ctx,
     const char* mac,
+    const char* job_id,
+    const char* source,
     const unsigned char* data,
     size_t len,
     char** error_msg
@@ -313,11 +340,11 @@ static int bluetooth_send(
     jclass socketClass = (*env)->GetObjectClass(env, socket);
     if (socketClass == NULL) {
         if (check_exception(env, "GetObjectClass(BluetoothSocket)", error_msg) != 0) {
-            close_socket_safe(env, socket);
+            close_socket_diagnostic(env, socket, job_id, source);
             (*env)->DeleteLocalRef(env, socket);
             return -1;
         }
-        close_socket_safe(env, socket);
+        close_socket_diagnostic(env, socket, job_id, source);
         (*env)->DeleteLocalRef(env, socket);
         if (error_msg) *error_msg = strdup("BluetoothSocket class not found");
         return -1;
@@ -325,37 +352,43 @@ static int bluetooth_send(
     jmethodID connect = (*env)->GetMethodID(env, socketClass, "connect", "()V");
     if (connect == NULL) {
         if (check_exception(env, "GetMethodID(connect)", error_msg) != 0) {
-            close_socket_safe(env, socket);
+            close_socket_diagnostic(env, socket, job_id, source);
             (*env)->DeleteLocalRef(env, socketClass);
             (*env)->DeleteLocalRef(env, socket);
             return -1;
         }
-        close_socket_safe(env, socket);
+        close_socket_diagnostic(env, socket, job_id, source);
         (*env)->DeleteLocalRef(env, socketClass);
         (*env)->DeleteLocalRef(env, socket);
         if (error_msg) *error_msg = strdup("connect method not found");
         return -1;
     }
+    double connect_started_ms = printcat_monotonic_ms();
     (*env)->CallVoidMethod(env, socket, connect);
+    double connect_elapsed_ms = printcat_monotonic_ms() - connect_started_ms;
     if (check_exception(env, "CallVoidMethod(connect)", error_msg) != 0) {
-        close_socket_safe(env, socket);
+        __android_log_print(ANDROID_LOG_WARN, "PrintCatBt",
+                            "job=%s source=%s stage=connect status=error duration_ms=%.3f",
+                            job_id, source, connect_elapsed_ms);
+        close_socket_diagnostic(env, socket, job_id, source);
         (*env)->DeleteLocalRef(env, socketClass);
         (*env)->DeleteLocalRef(env, socket);
         return -1;
     }
     __android_log_print(ANDROID_LOG_DEBUG, "PrintCatBt",
-                        "connect ok");
+                        "job=%s source=%s stage=connect status=ok duration_ms=%.3f",
+                        job_id, source, connect_elapsed_ms);
 
     // 7. BluetoothSocket.getOutputStream() -> OutputStream
     jmethodID getOutputStream = (*env)->GetMethodID(env, socketClass, "getOutputStream", "()Ljava/io/OutputStream;");
     if (getOutputStream == NULL) {
         if (check_exception(env, "GetMethodID(getOutputStream)", error_msg) != 0) {
-            close_socket_safe(env, socket);
+            close_socket_diagnostic(env, socket, job_id, source);
             (*env)->DeleteLocalRef(env, socketClass);
             (*env)->DeleteLocalRef(env, socket);
             return -1;
         }
-        close_socket_safe(env, socket);
+        close_socket_diagnostic(env, socket, job_id, source);
         (*env)->DeleteLocalRef(env, socketClass);
         (*env)->DeleteLocalRef(env, socket);
         if (error_msg) *error_msg = strdup("getOutputStream method not found");
@@ -363,13 +396,13 @@ static int bluetooth_send(
     }
     jobject outputStream = (*env)->CallObjectMethod(env, socket, getOutputStream);
     if (check_exception(env, "CallObjectMethod(getOutputStream)", error_msg) != 0) {
-        close_socket_safe(env, socket);
+        close_socket_diagnostic(env, socket, job_id, source);
         (*env)->DeleteLocalRef(env, socketClass);
         (*env)->DeleteLocalRef(env, socket);
         return -1;
     }
     if (outputStream == NULL) {
-        close_socket_safe(env, socket);
+        close_socket_diagnostic(env, socket, job_id, source);
         (*env)->DeleteLocalRef(env, socketClass);
         (*env)->DeleteLocalRef(env, socket);
         if (error_msg) *error_msg = strdup("failed to get OutputStream");
@@ -380,13 +413,13 @@ static int bluetooth_send(
     jclass outputStreamClass = (*env)->GetObjectClass(env, outputStream);
     if (outputStreamClass == NULL) {
         if (check_exception(env, "GetObjectClass(OutputStream)", error_msg) != 0) {
-            close_socket_safe(env, socket);
+            close_socket_diagnostic(env, socket, job_id, source);
             (*env)->DeleteLocalRef(env, outputStream);
             (*env)->DeleteLocalRef(env, socketClass);
             (*env)->DeleteLocalRef(env, socket);
             return -1;
         }
-        close_socket_safe(env, socket);
+        close_socket_diagnostic(env, socket, job_id, source);
         (*env)->DeleteLocalRef(env, outputStream);
         (*env)->DeleteLocalRef(env, socketClass);
         (*env)->DeleteLocalRef(env, socket);
@@ -396,14 +429,14 @@ static int bluetooth_send(
     jmethodID write = (*env)->GetMethodID(env, outputStreamClass, "write", "([B)V");
     if (write == NULL) {
         if (check_exception(env, "GetMethodID(write)", error_msg) != 0) {
-            close_socket_safe(env, socket);
+            close_socket_diagnostic(env, socket, job_id, source);
             (*env)->DeleteLocalRef(env, outputStreamClass);
             (*env)->DeleteLocalRef(env, outputStream);
             (*env)->DeleteLocalRef(env, socketClass);
             (*env)->DeleteLocalRef(env, socket);
             return -1;
         }
-        close_socket_safe(env, socket);
+        close_socket_diagnostic(env, socket, job_id, source);
         (*env)->DeleteLocalRef(env, outputStreamClass);
         (*env)->DeleteLocalRef(env, outputStream);
         (*env)->DeleteLocalRef(env, socketClass);
@@ -416,14 +449,14 @@ static int bluetooth_send(
         jbyteArray jPayload = (*env)->NewByteArray(env, (jsize)len);
         if (jPayload == NULL) {
             if (check_exception(env, "NewByteArray", error_msg) != 0) {
-                close_socket_safe(env, socket);
+                close_socket_diagnostic(env, socket, job_id, source);
                 (*env)->DeleteLocalRef(env, outputStreamClass);
                 (*env)->DeleteLocalRef(env, outputStream);
                 (*env)->DeleteLocalRef(env, socketClass);
                 (*env)->DeleteLocalRef(env, socket);
                 return -1;
             }
-            close_socket_safe(env, socket);
+            close_socket_diagnostic(env, socket, job_id, source);
             (*env)->DeleteLocalRef(env, outputStreamClass);
             (*env)->DeleteLocalRef(env, outputStream);
             (*env)->DeleteLocalRef(env, socketClass);
@@ -434,17 +467,22 @@ static int bluetooth_send(
         (*env)->SetByteArrayRegion(env, jPayload, 0, (jsize)len, (const jbyte*)data);
         if (check_exception(env, "SetByteArrayRegion", error_msg) != 0) {
             (*env)->DeleteLocalRef(env, jPayload);
-            close_socket_safe(env, socket);
+            close_socket_diagnostic(env, socket, job_id, source);
             (*env)->DeleteLocalRef(env, outputStreamClass);
             (*env)->DeleteLocalRef(env, outputStream);
             (*env)->DeleteLocalRef(env, socketClass);
             (*env)->DeleteLocalRef(env, socket);
             return -1;
         }
+        double write_started_ms = printcat_monotonic_ms();
         (*env)->CallVoidMethod(env, outputStream, write, jPayload);
+        double write_elapsed_ms = printcat_monotonic_ms() - write_started_ms;
         if (check_exception(env, "CallVoidMethod(write)", error_msg) != 0) {
+            __android_log_print(ANDROID_LOG_WARN, "PrintCatBt",
+                                "job=%s source=%s stage=write status=error bytes=%zu duration_ms=%.3f",
+                                job_id, source, len, write_elapsed_ms);
             (*env)->DeleteLocalRef(env, jPayload);
-            close_socket_safe(env, socket);
+            close_socket_diagnostic(env, socket, job_id, source);
             (*env)->DeleteLocalRef(env, outputStreamClass);
             (*env)->DeleteLocalRef(env, outputStream);
             (*env)->DeleteLocalRef(env, socketClass);
@@ -453,7 +491,8 @@ static int bluetooth_send(
         }
         (*env)->DeleteLocalRef(env, jPayload);
         __android_log_print(ANDROID_LOG_DEBUG, "PrintCatBt",
-                            "write ok (%zu bytes)", len);
+                            "job=%s source=%s stage=write status=ok bytes=%zu duration_ms=%.3f",
+                            job_id, source, len, write_elapsed_ms);
     }
 
     // 8b. OutputStream.flush()
@@ -473,21 +512,27 @@ static int bluetooth_send(
         __android_log_print(ANDROID_LOG_WARN, "PrintCatBt",
                             "flush method missing; skipping");
     } else {
+        double flush_started_ms = printcat_monotonic_ms();
         (*env)->CallVoidMethod(env, outputStream, flush);
+        double flush_elapsed_ms = printcat_monotonic_ms() - flush_started_ms;
         if (check_exception(env, "CallVoidMethod(flush)", error_msg) != 0) {
-            close_socket_safe(env, socket);
+            __android_log_print(ANDROID_LOG_WARN, "PrintCatBt",
+                                "job=%s source=%s stage=flush status=error duration_ms=%.3f",
+                                job_id, source, flush_elapsed_ms);
+            close_socket_diagnostic(env, socket, job_id, source);
             (*env)->DeleteLocalRef(env, outputStreamClass);
             (*env)->DeleteLocalRef(env, outputStream);
             (*env)->DeleteLocalRef(env, socketClass);
             (*env)->DeleteLocalRef(env, socket);
             return -1;
         }
-        __android_log_print(ANDROID_LOG_DEBUG, "PrintCatBt", "flush ok");
+        __android_log_print(ANDROID_LOG_DEBUG, "PrintCatBt",
+                            "job=%s source=%s stage=flush status=ok duration_ms=%.3f",
+                            job_id, source, flush_elapsed_ms);
     }
 
     // 9. Tutup socket dan bersihkan resources
-    close_socket_safe(env, socket);
-    __android_log_print(ANDROID_LOG_DEBUG, "PrintCatBt", "socket closed");
+    close_socket_diagnostic(env, socket, job_id, source);
     (*env)->DeleteLocalRef(env, outputStreamClass);
     (*env)->DeleteLocalRef(env, outputStream);
     (*env)->DeleteLocalRef(env, socketClass);
@@ -508,10 +553,24 @@ func (t *BluetoothTransport) send(ctx context.Context, endpoint string, payload 
 		return nil
 	}
 
-	var result error
-	done := make(chan struct{})
+	info := printer.JobDiagnosticsFromContext(ctx)
+	jobID := diagnosticToken(info.JobID)
+	source := diagnosticToken(info.Source)
+	metrics := printer.AnalyzePayload(info.Protocol, payload)
+	deadline, hasDeadline := ctx.Deadline()
+	deadlineMs := int64(-1)
+	if hasDeadline {
+		deadlineMs = time.Until(deadline).Milliseconds()
+	}
+	log.Printf("[PrintCatBt][go] job_id=%s source=%s event=send_start payload_bytes=%d sha256=%s raster_width_bytes=%d raster_width_dots_padded=%d raster_height_dots=%d raster_bytes_declared=%d bytes_after_raster_header=%d trailing_bytes_after_raster=%d raster_data_incomplete=%t raster_header_hex=%q deadline_ms=%d",
+		jobID, source, metrics.PayloadBytes, metrics.SHA256, metrics.RasterWidthBytes,
+		metrics.RasterWidthDotsPadded, metrics.RasterHeightDots, metrics.RasterBytesDeclared,
+		metrics.BytesAfterRasterHeader, metrics.TrailingBytesAfterRaster, metrics.RasterDataIncomplete,
+		metrics.RasterHeaderHex, deadlineMs)
+	done := make(chan error, 1)
+	sendDecision := make(chan bool, 1)
 	go func() {
-		defer close(done)
+		started := time.Now()
 		err := driver.RunNative(func(raw interface{}) error {
 			ac, ok := raw.(*driver.AndroidContext)
 			if !ok {
@@ -521,8 +580,13 @@ func (t *BluetoothTransport) send(ctx context.Context, endpoint string, payload 
 			ctxObj := (C.jobject)(unsafe.Pointer(ac.Ctx))
 			cMac := C.CString(endpoint)
 			defer C.free(unsafe.Pointer(cMac))
+			cJobID := C.CString(jobID)
+			defer C.free(unsafe.Pointer(cJobID))
+			cSource := C.CString(source)
+			defer C.free(unsafe.Pointer(cSource))
 			var errMsg *C.char
-			ret := C.bluetooth_send(env, ctxObj, cMac, (*C.uchar)(unsafe.Pointer(&payload[0])), C.size_t(len(payload)), &errMsg)
+			ret := C.bluetooth_send(env, ctxObj, cMac, cJobID, cSource,
+				(*C.uchar)(unsafe.Pointer(&payload[0])), C.size_t(len(payload)), &errMsg)
 			if ret != 0 {
 				if errMsg != nil {
 					defer C.free(unsafe.Pointer(errMsg))
@@ -532,13 +596,17 @@ func (t *BluetoothTransport) send(ctx context.Context, endpoint string, payload 
 			}
 			return nil
 		})
-		result = err
+		done <- err
+		returnedBeforeCompletion := <-sendDecision
+		log.Printf("[PrintCatBt][go] job_id=%s source=%s event=native_complete duration_ms=%d returned_before_completion=%t error=%t",
+			jobID, source, time.Since(started).Milliseconds(), returnedBeforeCompletion, err != nil)
 	}()
 
-	select {
-	case <-done:
-		return result
-	case <-ctx.Done():
-		return ctx.Err()
+	err, pending := awaitSend(ctx, done)
+	sendDecision <- pending
+	if pending {
+		log.Printf("[PrintCatBt][go] job_id=%s source=%s event=send_returned_with_native_pending context_error=%q",
+			jobID, source, err)
 	}
+	return err
 }

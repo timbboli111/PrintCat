@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"image"
+	"image/color"
 	"image/png"
 	"testing"
 
@@ -136,6 +137,41 @@ func TestImageRenderingPreservesAspectRatio(t *testing.T) {
 	}
 	if ras.Pixels[100*ras.Width+10] != 0 {
 		t.Error("contained image area is not black")
+	}
+}
+
+func TestTransparentImageCanCompositeOverWhite(t *testing.T) {
+	r := &Renderer{}
+	doc := document.New("test", "test", document.Size{Width: 20_000, Height: 20_000})
+	src := image.NewNRGBA(image.Rect(0, 0, 8, 8))
+	src.SetNRGBA(7, 7, color.NRGBA{R: 0, G: 0, B: 0, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, src); err != nil {
+		t.Fatal(err)
+	}
+	doc.Elements = append(doc.Elements, document.NewImageElement("alpha", buf.Bytes(), "image/png", document.Rect{
+		Position: document.Point{X: 2_000, Y: 2_000},
+		Size:     document.Size{Width: 8_000, Height: 8_000},
+	}))
+
+	legacyRaster, err := r.Render(context.Background(), doc, render.Target{DPI: 254})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compositedRaster, err := r.Render(context.Background(), doc, render.Target{DPI: 254, CompositeAlphaOnWhite: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transparentSample := (20+10)*legacyRaster.Width + (20 + 10)
+	if legacyRaster.Pixels[transparentSample] == 255 {
+		t.Fatal("setup error: legacy transparent image sample unexpectedly white")
+	}
+	if compositedRaster.Pixels[transparentSample] != 255 {
+		t.Errorf("transparent source pixel = %d, want white (255)", compositedRaster.Pixels[transparentSample])
+	}
+	blackSample := (20+75)*compositedRaster.Width + (20 + 75)
+	if compositedRaster.Pixels[blackSample] >= 160 {
+		t.Errorf("opaque black source pixel = %d, want darker than print threshold", compositedRaster.Pixels[blackSample])
 	}
 }
 

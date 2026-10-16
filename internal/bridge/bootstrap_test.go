@@ -50,7 +50,11 @@ func TestBootstrapLoadsActivePrinterFromConfig(t *testing.T) {
 			Transport: printer.TCP,
 			Endpoint:  "127.0.0.1:9100",
 		},
-		Profile: printer.PrinterProfile{DPI: 203},
+		Profile: printer.PrinterProfile{
+			DPI:                     203,
+			SmartTrimEnabled:        true,
+			SmartTrimBottomMarginUm: 1750,
+		},
 	}
 
 	cfg := config.Default()
@@ -86,6 +90,12 @@ func TestBootstrapLoadsActivePrinterFromConfig(t *testing.T) {
 	}
 	if got.Profile.DPI != want.Profile.DPI {
 		t.Errorf("DPI = %d, want %d", got.Profile.DPI, want.Profile.DPI)
+	}
+	if got.Profile.SmartTrimEnabled != want.Profile.SmartTrimEnabled ||
+		got.Profile.SmartTrimBottomMarginUm != want.Profile.SmartTrimBottomMarginUm {
+		t.Errorf("Smart Trim profile = enabled:%t margin:%d, want enabled:%t margin:%d",
+			got.Profile.SmartTrimEnabled, got.Profile.SmartTrimBottomMarginUm,
+			want.Profile.SmartTrimEnabled, want.Profile.SmartTrimBottomMarginUm)
 	}
 }
 

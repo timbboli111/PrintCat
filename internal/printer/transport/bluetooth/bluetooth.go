@@ -73,3 +73,39 @@ func getChannel(options map[string]string) int {
 	}
 	return 1
 }
+
+// awaitSend returns pending=true when ctx expires before the operation has
+// completed. The caller must treat that as a still-running native operation;
+// cancellation of the context does not cancel an in-flight JNI call.
+func awaitSend(ctx context.Context, done <-chan error) (err error, pending bool) {
+	select {
+	case err := <-done:
+		return err, false
+	case <-ctx.Done():
+		select {
+		case <-done:
+			return ctx.Err(), false
+		default:
+			return ctx.Err(), true
+		}
+	}
+}
+
+func diagnosticToken(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	const maxLength = 80
+	if len(value) > maxLength {
+		value = value[:maxLength]
+	}
+	result := []byte(value)
+	for i, b := range result {
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || b == '-' || b == '_' || b == '.' {
+			continue
+		}
+		result[i] = '_'
+	}
+	return string(result)
+}

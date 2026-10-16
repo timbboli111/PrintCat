@@ -2,11 +2,59 @@ package bluetooth
 
 import (
 	"context"
+	"errors"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/timboli111/PrintCat/internal/printer"
 )
+
+func TestAwaitSendReportsNativeOperationStillPendingAfterContextError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	allowNativeCompletion := make(chan struct{})
+	nativeDone := make(chan struct{})
+	go func() {
+		<-allowNativeCompletion
+		close(nativeDone)
+		done <- nil
+	}()
+
+	cancel()
+	err, pending := awaitSend(ctx, done)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("awaitSend error = %v, want context.Canceled", err)
+	}
+	if !pending {
+		t.Fatal("awaitSend pending = false, want true")
+	}
+	select {
+	case <-nativeDone:
+		t.Fatal("native operation unexpectedly completed before being released")
+	default:
+	}
+
+	close(allowNativeCompletion)
+	select {
+	case <-nativeDone:
+	case <-time.After(time.Second):
+		t.Fatal("native operation did not finish after release")
+	}
+}
+
+func TestDiagnosticTokenSanitizesAndBoundsValue(t *testing.T) {
+	if got := diagnosticToken("framework job/42"); got != "framework_job_42" {
+		t.Fatalf("diagnosticToken() = %q", got)
+	}
+	if got := diagnosticToken(""); got != "unknown" {
+		t.Fatalf("empty diagnosticToken() = %q", got)
+	}
+	if got := diagnosticToken(strings.Repeat("a", 90)); len(got) != 80 {
+		t.Fatalf("diagnosticToken length = %d, want 80", len(got))
+	}
+}
 
 func TestKind(t *testing.T) {
 	tr := &BluetoothTransport{}

@@ -1,14 +1,22 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"path/filepath"
 	"testing"
 
+	"github.com/timboli111/PrintCat/internal/config"
 	"github.com/timboli111/PrintCat/internal/document"
 	"github.com/timboli111/PrintCat/internal/printer"
+	"github.com/timboli111/PrintCat/internal/printer/escpos"
 	"github.com/timboli111/PrintCat/internal/render"
+	"github.com/timboli111/PrintCat/internal/render/basic"
 )
 
 type fakeBackend struct{ protocol printer.Protocol }
@@ -67,12 +75,24 @@ func TestSubmitSendsOneCallPerPage(t *testing.T) {
 		PageWidthsUm:  []int64{10000, 10000, 10000},
 		PageHeightsUm: []int64{10000, 10000, 10000},
 		DPI:           203,
+		JobID:         "android-job-abc",
 	}
 	if err := s.Submit(context.Background(), req); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 	if len(tr.Payloads) != 3 {
 		t.Fatalf("expected 3 payloads, got %d", len(tr.Payloads))
+	}
+	if len(tr.JobDiagnostics) != 3 {
+		t.Fatalf("expected diagnostics for 3 pages, got %d", len(tr.JobDiagnostics))
+	}
+	for i, info := range tr.JobDiagnostics {
+		if info.JobID != req.JobID || info.Source != printer.SourceAndroidPrintFramework {
+			t.Errorf("page %d diagnostics = %+v", i+1, info)
+		}
+		if info.Page != i+1 || info.PageCount != len(req.Pages) {
+			t.Errorf("page %d metadata = %d/%d", i+1, info.Page, info.PageCount)
+		}
 	}
 }
 
@@ -184,4 +204,94 @@ func TestSubmitMultiPageHonorsContextCancellation(t *testing.T) {
 		t.Errorf("expected 1 payload sent before cancellation, got %d",
 			len(tr.Payloads))
 	}
+}
+
+func TestSubmitTrimsEachPDFPageIndependently(t *testing.T) {
+	svc := printer.NewService()
+	if err := svc.RegisterBackend(&escpos.Encoder{}); err != nil {
+		t.Fatal(err)
+	}
+	transport := &printer.MemoryTransport{TransportKind: printer.TCP}
+	if err := svc.RegisterTransport(transport); err != nil {
+		t.Fatal(err)
+	}
+	state := NewState(svc, &basic.Renderer{})
+	wantPrinter := printer.Printer{
+		ID:         "trim-test-printer",
+		Name:       "Trim test printer",
+		Connection: printer.Connection{Protocol: printer.ESCPOS, Transport: printer.TCP, Endpoint: "test"},
+		Profile: printer.PrinterProfile{
+			DPI:                     254,
+			SmartTrimEnabled:        true,
+			SmartTrimBottomMarginUm: 100,
+		},
+	}
+	cfg := config.Default()
+	cfg.SavedPrinters = []config.SavedPrinter{{
+		Printer:       wantPrinter,
+		PaperWidthMm:  1,
+		PaperHeightMm: 1,
+	}}
+	cfg.ActivePrinterID = wantPrinter.ID
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loadActivePrinterFromConfig(state, configPath)
+	gotPrinter := state.ActivePrinter()
+	if gotPrinter == nil || !gotPrinter.Profile.SmartTrimEnabled ||
+		gotPrinter.Profile.SmartTrimBottomMarginUm != wantPrinter.Profile.SmartTrimBottomMarginUm {
+		t.Fatalf("active profile loaded from config = %+v, want %+v", gotPrinter, wantPrinter.Profile)
+	}
+
+	pagePNG := func(width, height, lastInkRow int) []byte {
+		t.Helper()
+		img := image.NewGray(image.Rect(0, 0, width, height))
+		for i := range img.Pix {
+			img.Pix[i] = 255
+		}
+		img.SetGray(1, lastInkRow, color.Gray{Y: 0})
+		img.SetGray(2, lastInkRow, color.Gray{Y: 0})
+		var encoded bytes.Buffer
+		if err := png.Encode(&encoded, img); err != nil {
+			t.Fatal(err)
+		}
+		return encoded.Bytes()
+	}
+	err := state.Submit(context.Background(), SubmitRequest{
+		Pages:         [][]byte{pagePNG(8, 10, 2), pagePNG(8, 12, 4)},
+		PageWidthsUm:  []int64{800, 800},
+		PageHeightsUm: []int64{1000, 1200},
+		DPI:           254,
+		JobID:         "smart-trim-multipage",
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(transport.Payloads) != 2 {
+		t.Fatalf("payload count=%d, want 2", len(transport.Payloads))
+	}
+	wantHeights := []int{4, 6}
+	for i, payload := range transport.Payloads {
+		widthBytes, height := rasterDimensionsFromPayload(t, payload)
+		if widthBytes != 1 || height != wantHeights[i] {
+			t.Errorf("page %d raster header=%dx%d, want 1x%d", i+1, widthBytes, height, wantHeights[i])
+		}
+		if got, want := len(payload), 10+widthBytes*height; got != want {
+			t.Errorf("page %d payload length=%d, header declares %d raster bytes plus 10-byte prefix", i+1, got, want-10)
+		}
+	}
+}
+
+func rasterDimensionsFromPayload(t *testing.T, payload []byte) (widthBytes, height int) {
+	t.Helper()
+	for i := 0; i+7 < len(payload); i++ {
+		if payload[i] == 0x1D && payload[i+1] == 0x76 && payload[i+2] == 0x30 {
+			widthBytes = int(payload[i+4]) | (int(payload[i+5]) << 8)
+			height = int(payload[i+6]) | (int(payload[i+7]) << 8)
+			return widthBytes, height
+		}
+	}
+	t.Fatal("GS v 0 raster header not found")
+	return 0, 0
 }
